@@ -87,56 +87,39 @@ class SplashActivity : AppCompatActivity() {
         tvVersion.text = "v$versionName"
         
         // Posicionar la versión de forma independiente, bastante más abajo
+        // Usar post para asegurar que el layout esté listo
         tvDragmax.post {
-            tvDragmax.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
-                override fun onGlobalLayout() {
-                    tvDragmax.viewTreeObserver.removeOnGlobalLayoutListener(this)
-                    
-                    // Obtener dimensiones de la pantalla
-                    val screenHeight = resources.displayMetrics.heightPixels
-                    val screenWidth = resources.displayMetrics.widthPixels
-                    
-                    // El texto principal está centrado, obtener su posición
-                    val dragmaxLeft = tvDragmax.left
-                    val dragmaxWidth = tvDragmax.width
-                    val dragmaxCenterX = dragmaxLeft + (dragmaxWidth / 2)
-                    
-                    // Calcular posición de la versión de forma independiente
-                    val versionParams = tvVersion.layoutParams as android.widget.FrameLayout.LayoutParams
-                    
-                    // Posicionar la versión un poco más abajo del texto principal
-                    val topMarginPercent = 0.60f
-                    val targetY = screenHeight * topMarginPercent
-                    
-                    // Primero centrar horizontalmente
-                    tvVersion.measure(
-                        android.view.View.MeasureSpec.makeMeasureSpec(screenWidth, android.view.View.MeasureSpec.AT_MOST),
-                        android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
-                    )
-                    val versionWidth = tvVersion.measuredWidth
-                    
-                    // Calcular el centro horizontal de la versión (centro de la pantalla)
-                    val versionCenterX = screenWidth / 2
-                    
-                    // Configurar layout params
-                    versionParams.gravity = android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
-                    versionParams.topMargin = targetY.toInt()
-                    versionParams.leftMargin = 0
-                    versionParams.rightMargin = 0
-                    
-                    tvVersion.layoutParams = versionParams
-                    
-                    // Posicionar el círculo de progreso debajo de la versión usando la posición calculada
-                    positionProgressCircle(targetY.toInt(), versionCenterX)
-                    
-                    // Forzar el layout
-                    tvVersion.post {
-                        tvVersion.translationY = 0f // Asegurar que no hay translation
-                        tvVersion.requestLayout()
-                        tvVersion.invalidate()
+            if (tvDragmax.viewTreeObserver.isAlive) {
+                tvDragmax.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                    override fun onGlobalLayout() {
+                        if (!tvDragmax.viewTreeObserver.isAlive) return
+                        tvDragmax.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                        
+                        // Obtener dimensiones de la pantalla (cachear)
+                        val displayMetrics = resources.displayMetrics
+                        val screenHeight = displayMetrics.heightPixels
+                        val screenWidth = displayMetrics.widthPixels
+                        
+                        // Calcular posición de la versión de forma independiente
+                        val versionParams = tvVersion.layoutParams as android.widget.FrameLayout.LayoutParams
+                        
+                        // Posicionar la versión un poco más abajo del texto principal
+                        val topMarginPercent = 0.60f
+                        val targetY = (screenHeight * topMarginPercent).toInt()
+                        val versionCenterX = screenWidth / 2
+                        
+                        // Configurar layout params de una vez
+                        versionParams.gravity = android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
+                        versionParams.topMargin = targetY
+                        versionParams.leftMargin = 0
+                        versionParams.rightMargin = 0
+                        tvVersion.layoutParams = versionParams
+                        
+                        // Posicionar el círculo de progreso debajo de la versión
+                        positionProgressCircle(targetY, versionCenterX)
                     }
-                }
-            })
+                })
+            }
         }
         
         // Configurar los gradientes (fill y stroke) para ambos textos
@@ -192,6 +175,7 @@ class SplashActivity : AppCompatActivity() {
         val runnable = object : Runnable {
             override fun run() {
                 if (currentIndex < fullText.length) {
+                    // Usar StringBuilder para mejor rendimiento
                     val textToShow = fullText.substring(0, currentIndex + 1)
                     tvDragmax.text = textToShow
                     currentIndex++
@@ -202,7 +186,7 @@ class SplashActivity : AppCompatActivity() {
                 }
             }
         }
-        handler.postDelayed(runnable, 300) // Iniciar después de 300ms
+        handler.postDelayed(runnable, 100) // Reducir delay inicial para mejor fluidez
     }
     
     private fun startPulseAnimation() {
@@ -236,13 +220,24 @@ class SplashActivity : AppCompatActivity() {
      * Posiciona el círculo de progreso debajo de la versión con mínimo espacio
      */
     private fun positionProgressCircle(versionTopMargin: Int, versionCenterX: Int) {
-        // Obtener altura de la versión
-        tvVersion.measure(
-            android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
-            android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
-        )
-        val versionHeight = tvVersion.measuredHeight
-        
+        // Obtener altura de la versión de forma optimizada
+        tvVersion.post {
+            val versionHeight = tvVersion.height
+            if (versionHeight == 0) {
+                // Si aún no tiene altura, medir una vez
+                tvVersion.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
+                    android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+                )
+                val measuredHeight = tvVersion.measuredHeight
+                positionProgressCircleInternal(versionTopMargin, versionCenterX, measuredHeight)
+            } else {
+                positionProgressCircleInternal(versionTopMargin, versionCenterX, versionHeight)
+            }
+        }
+    }
+    
+    private fun positionProgressCircleInternal(versionTopMargin: Int, versionCenterX: Int, versionHeight: Int) {
         // Convertir 16dp a píxeles para el espacio mínimo entre versión y progreso
         val spaceDp = 16
         val spacePx = (spaceDp * resources.displayMetrics.density).toInt()
@@ -253,16 +248,20 @@ class SplashActivity : AppCompatActivity() {
         progressParams.gravity = android.view.Gravity.TOP
         
         // Centrar horizontalmente con respecto a la versión
-        progressCircle.measure(
-            android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
-            android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
-        )
-        val progressWidth = progressCircle.measuredWidth
-        progressParams.leftMargin = versionCenterX - (progressWidth / 2)
+        val progressWidth = progressCircle.width
+        if (progressWidth > 0) {
+            progressParams.leftMargin = versionCenterX - (progressWidth / 2)
+        } else {
+            // Si aún no tiene ancho, medir una vez
+            progressCircle.measure(
+                android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED),
+                android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+            )
+            val measuredWidth = progressCircle.measuredWidth
+            progressParams.leftMargin = versionCenterX - (measuredWidth / 2)
+        }
         
         progressCircle.layoutParams = progressParams
-        progressCircle.requestLayout()
-        progressCircle.invalidate()
     }
     
     private fun hideSystemBars() {

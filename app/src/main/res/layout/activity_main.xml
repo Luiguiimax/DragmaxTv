@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/splash_background"
@@ -69,7 +70,7 @@
             android:layout_width="200dp"
             android:layout_height="match_parent"
             android:layout_gravity="start|center_vertical"
-            android:layout_marginStart="24dp"
+            android:layout_marginStart="8dp"
             android:orientation="vertical"
             android:background="@drawable/rounded_panel"
             android:padding="16dp"
@@ -169,7 +170,7 @@
             android:layout_marginStart="100dp"
             android:layout_marginEnd="140dp"
             android:background="@drawable/reproductor_border_selector"
-            android:padding="16dp"
+            android:padding="0dp"
             android:elevation="0dp"
             android:focusable="true"
             android:clickable="true"
@@ -178,11 +179,14 @@
             android:nextFocusLeft="@id/tvNavItem1"
             android:nextFocusRight="@id/rightSidebar">
 
-            <!-- Placeholder para contenido dinámico -->
-            <View
+            <!-- ExoPlayer PlayerView -->
+            <androidx.media3.ui.PlayerView
+                android:id="@+id/playerView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:background="#000000" />
+                android:background="#000000"
+                app:resize_mode="fit"
+                app:use_controller="true" />
         </FrameLayout>
 
         <!-- Sidebar derecho - Lista de canales (como estaba antes) -->
@@ -233,6 +237,30 @@
             android:src="@android:drawable/ic_menu_search"
             android:contentDescription="@string/search"
             android:tint="#000000" />
+    </FrameLayout>
+
+    <!-- Indicador de estado de progreso (esquina inferior derecha) -->
+    <FrameLayout
+        android:id="@+id/statusIndicatorContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="24dp"
+        android:background="@drawable/status_indicator_background"
+        android:padding="16dp"
+        android:visibility="gone"
+        android:elevation="8dp">
+        
+        <TextView
+            android:id="@+id/tvStatusIndicator"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Descargando canales… 0%"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:gravity="center" />
     </FrameLayout>
 
 </FrameLayout>
