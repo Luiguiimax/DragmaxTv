@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/splash_background"
+    android:fitsSystemWindows="false">
+
+    <!-- Barra superior con iconos de búsqueda y perfil -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="24dp"
+        android:layout_marginEnd="24dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <!-- Icono de búsqueda -->
+        <FrameLayout
+            android:id="@+id/flSearchTop"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="16dp"
+            android:background="@drawable/icon_background_selector"
+            android:focusable="true"
+            android:clickable="true"
+            android:padding="8dp"
+            android:nextFocusDown="@id/tvNavItem1"
+            android:nextFocusRight="@id/flProfile">
+            <ImageView
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:src="@android:drawable/ic_menu_search"
+                android:contentDescription="@string/search"
+                android:tint="#000000" />
+        </FrameLayout>
+
+        <!-- Icono de perfil -->
+        <FrameLayout
+            android:id="@+id/flProfile"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="@drawable/icon_background_selector"
+            android:focusable="true"
+            android:clickable="true"
+            android:padding="8dp"
+            android:nextFocusDown="@id/tvNavItem1"
+            android:nextFocusLeft="@id/flSearchTop">
+            <ImageView
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:src="@drawable/ic_user"
+                android:contentDescription="@string/profile"
+                android:tint="#000000" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <!-- Contenedor principal -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="80dp"
+        android:layout_marginBottom="80dp">
+
+        <!-- Panel de navegación izquierdo - por encima del reproductor -->
+        <LinearLayout
+            android:id="@+id/leftNavPanel"
+            android:layout_width="200dp"
+            android:layout_height="match_parent"
+            android:layout_gravity="start|center_vertical"
+            android:layout_marginStart="24dp"
+            android:orientation="vertical"
+            android:background="@drawable/rounded_panel"
+            android:padding="16dp"
+            android:gravity="start"
+            android:elevation="4dp">
+
+            <TextView
+                android:id="@+id/tvNavItem1"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="TV"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:background="@drawable/nav_item_background"
+                android:padding="12dp"
+                android:focusable="true"
+                android:clickable="true"
+                android:nextFocusUp="@id/flSearchTop"
+                android:nextFocusDown="@id/tvNavItem2"
+                android:nextFocusRight="@id/mainContentArea"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/tvNavItem2"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="PELICULAS"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:background="@drawable/nav_item_background"
+                android:padding="12dp"
+                android:focusable="true"
+                android:clickable="true"
+                android:nextFocusUp="@id/tvNavItem1"
+                android:nextFocusDown="@id/tvNavItem3"
+                android:nextFocusRight="@id/mainContentArea"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/tvNavItem3"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="SERIES"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:background="@drawable/nav_item_background"
+                android:padding="12dp"
+                android:focusable="true"
+                android:clickable="true"
+                android:nextFocusUp="@id/tvNavItem2"
+                android:nextFocusDown="@id/tvNavItem4"
+                android:nextFocusRight="@id/mainContentArea"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/tvNavItem4"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ANIME"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:background="@drawable/nav_item_background"
+                android:padding="12dp"
+                android:focusable="true"
+                android:clickable="true"
+                android:nextFocusUp="@id/tvNavItem3"
+                android:nextFocusDown="@id/tvNavItem5"
+                android:nextFocusRight="@id/mainContentArea"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:id="@+id/tvNavItem5"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="DRAMAS CORTOS"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:background="@drawable/nav_item_background"
+                android:padding="12dp"
+                android:focusable="true"
+                android:clickable="true"
+                android:nextFocusUp="@id/tvNavItem4"
+                android:nextFocusDown="@id/mainContentArea"
+                android:nextFocusRight="@id/mainContentArea" />
+        </LinearLayout>
+
+        <!-- Área de contenido principal (reproductor) - por debajo del panel izquierdo -->
+        <FrameLayout
+            android:id="@+id/mainContentArea"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_marginStart="100dp"
+            android:layout_marginEnd="140dp"
+            android:background="@drawable/reproductor_border_selector"
+            android:padding="16dp"
+            android:elevation="0dp"
+            android:focusable="true"
+            android:clickable="true"
+            android:nextFocusUp="@id/tvNavItem1"
+            android:nextFocusDown="@id/flSearchBottom"
+            android:nextFocusLeft="@id/tvNavItem1"
+            android:nextFocusRight="@id/rightSidebar">
+
+            <!-- Placeholder para contenido dinámico -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="#000000" />
+        </FrameLayout>
+
+        <!-- Sidebar derecho - Lista de canales (como estaba antes) -->
+        <LinearLayout
+            android:id="@+id/rightSidebar"
+            android:layout_width="120dp"
+            android:layout_height="match_parent"
+            android:layout_gravity="end|center_vertical"
+            android:layout_marginEnd="24dp"
+            android:orientation="vertical"
+            android:background="@drawable/sidebar_background_selector"
+            android:gravity="center"
+            android:padding="16dp"
+            android:focusable="true"
+            android:clickable="true"
+            android:nextFocusUp="@id/tvNavItem1"
+            android:nextFocusDown="@id/flSearchBottom"
+            android:nextFocusLeft="@id/mainContentArea">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="lista de canales"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:gravity="center" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Icono de búsqueda inferior central -->
+    <FrameLayout
+        android:id="@+id/flSearchBottom"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="24dp"
+        android:background="@drawable/icon_background_selector"
+        android:focusable="true"
+        android:clickable="true"
+        android:padding="8dp"
+        android:nextFocusUp="@id/mainContentArea"
+        android:nextFocusLeft="@id/tvNavItem1"
+        android:nextFocusRight="@id/rightSidebar">
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:src="@android:drawable/ic_menu_search"
+            android:contentDescription="@string/search"
+            android:tint="#000000" />
+    </FrameLayout>
+
+</FrameLayout>

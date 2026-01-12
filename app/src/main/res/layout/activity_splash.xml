@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/splash_background"
+    android:fitsSystemWindows="false">
+
+    <!-- ImageView para el GIF animado (encima del fondo degradado, detrás de los textos) -->
+    <ImageView
+        android:id="@+id/ivGifBackground"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:contentDescription="@string/app_name"
+        android:visibility="gone" />
+
+    <!-- Texto principal centrado (posición fija) -->
+    <com.dragmax.dragmaxtv.GradientStrokeTextView
+        android:id="@+id/tvDragmax"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="Dragmax Tv"
+        android:textSize="72sp"
+        android:textStyle="bold"
+        android:fontFamily="sans-serif-black"
+        android:padding="20dp"
+        android:gravity="center" />
+
+    <!-- Versión posicionada debajo del texto principal -->
+    <com.dragmax.dragmaxtv.GradientStrokeTextView
+        android:id="@+id/tvVersion"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:fontFamily="sans-serif-black"
+        android:gravity="center"
+        android:padding="10dp"
+        android:text="v1.0"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        android:visibility="invisible" />
+
+    <!-- Indicador de progreso circular -->
+    <ProgressBar
+        android:id="@+id/progressCircle"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top"
+        android:indeterminateDrawable="@drawable/progress_rotate"
+        android:visibility="visible" />
+
+</FrameLayout>
+

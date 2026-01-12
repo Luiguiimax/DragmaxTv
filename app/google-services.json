@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "536929992112",
+    "project_id": "dragmaxtvapp",
+    "storage_bucket": "dragmaxtvapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:536929992112:android:3fc5561ca1da5c9a756a75",
+        "android_client_info": {
+          "package_name": "com.dragmax.dragmaxtv"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDNC04MngmeMytPQzh-CJnZ9KilBiVczuE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
