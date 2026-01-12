@@ -7,4 +7,10 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- Colores para el texto Dragmax Tv -->
+    <color name="orange">#FFFF6600</color>
+    <color name="yellow">#FFFFD700</color>
+    <color name="red">#FFFF0000</color>
+    <color name="blue_dark">#FF000080</color>
+    <color name="blue_light">#FF4169E1</color>
 </resources>
