@@ -498,12 +498,12 @@ class ChannelRepository(
     }
     
     /**
-     * Busca "Caracol FHD" en el grupo "COLOMBIA" desde Room
+     * Busca "Caracol HD" en el grupo "COLOMBIA" desde Room
      * Si no existe, devuelve el primer canal del grupo "COLOMBIA"
      */
     suspend fun getCaracolFHDOrFirstColombia(): LiveChannel? = withContext(Dispatchers.IO) {
-        // Primero intentar encontrar "Caracol FHD" en "COLOMBIA"
-        val caracolFHD = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "Caracol FHD")
+        // Primero intentar encontrar "Caracol HD" en "COLOMBIA"
+        val caracolFHD = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "Caracol HD")
         if (caracolFHD != null) {
             return@withContext caracolFHD
         }
@@ -518,7 +518,7 @@ class ChannelRepository(
      * Usa estos datos para ExoPlayer
      */
     suspend fun loadChannelFromRoom(): LiveChannel? = withContext(Dispatchers.IO) {
-        // Buscar "Caracol FHD" en "COLOMBIA" o el primer canal de "COLOMBIA"
+        // Buscar "Caracol HD" en "COLOMBIA" o el primer canal de "COLOMBIA"
         getCaracolFHDOrFirstColombia()
     }
     
@@ -558,7 +558,7 @@ class ChannelRepository(
     
     /**
      * Obtiene la lista de canales para el panel derecho
-     * Incluye: Caracol FHD, Win Sports + FHD, RCN FHD, NTN24, DIRECTV SPORTS 2 CO, y canales aleatorios
+     * Incluye: Caracol FHD, Win Sports + FHD, RCN FHD, NTN24, DIRECTV SPORTS 2 CO, ESPN HD PREMIUM (urlm3u2), y canales aleatorios
      * Protegido contra sobrecarga de Room
      */
     suspend fun getChannelsForSidebar(): List<LiveChannel> = withContext(Dispatchers.IO) {
@@ -567,8 +567,9 @@ class ChannelRepository(
             
             // 1. Caracol FHD (COLOMBIA) - con protección
             try {
-                val caracol = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "Caracol FHD")
-                if (caracol != null) channels.add(caracol)
+                val caracolFHD = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "Caracol FHD")
+                    ?: findChannelByName("Caracol FHD")
+                if (caracolFHD != null) channels.add(caracolFHD)
             } catch (e: Exception) {
                 Log.w("ChannelRepository", "Error loading Caracol FHD: ${e.message}")
             }
@@ -609,9 +610,9 @@ class ChannelRepository(
                 Log.w("ChannelRepository", "Error loading DIRECTV SPORTS 2 CO: ${e.message}")
             }
             
-            // 6. Completar hasta 10 con canales aleatorios (excluyendo los ya agregados) - con protección
+            // Completar hasta 10 con canales aleatorios (excluyendo los ya agregados) - con protección
+            val existingIds = channels.map { it.id }.toMutableSet() // MutableSet para poder agregar IDs
             try {
-                val existingIds = channels.map { it.id }.toMutableSet() // MutableSet para poder agregar IDs
                 val needed = 10 - channels.size
                 
                 if (needed > 0) {
@@ -643,6 +644,122 @@ class ChannelRepository(
                 }
             } catch (e: Exception) {
                 Log.w("ChannelRepository", "Error loading random channels: ${e.message}")
+            }
+            
+            // Buscar ESPN | 1 LATINOAMERICA en la categoría "ESPN HD PREMIUM" desde urlm3u2 y colocarlo en posición 6 (índice 5)
+            // Reemplazando el canal aleatorio que está en esa posición
+            try {
+                // Obtener el ID de urlm3u2
+                val urlm3u2 = m3uUrlDao.getUrlByFieldName("urlm3u2")
+                if (urlm3u2 != null) {
+                    var espn: LiveChannel? = null
+                    
+                    // Método 1: Buscar directamente por grupo y nombre exacto
+                    try {
+                        espn = liveChannelDao.getChannelByGroupAndName("ESPN HD PREMIUM", "ESPN | 1 LATINOAMERICA")
+                        if (espn != null) {
+                            Log.d("ChannelRepository", "Found ESPN | 1 LATINOAMERICA by exact group and name")
+                        }
+                    } catch (e: Exception) {
+                        Log.w("ChannelRepository", "Error searching by exact group and name: ${e.message}")
+                    }
+                    
+                    // Método 2: Si no se encontró, buscar en todos los canales del grupo "ESPN HD PREMIUM"
+                    if (espn == null) {
+                        try {
+                            val channelsFromEspnGroup = liveChannelDao.getChannelsByGroup("ESPN HD PREMIUM")
+                            Log.d("ChannelRepository", "Found ${channelsFromEspnGroup.size} channels in ESPN HD PREMIUM group")
+                            
+                            // Buscar el canal con nombre "ESPN | 1 LATINOAMERICA" o "espn.co"
+                            espn = channelsFromEspnGroup.firstOrNull { channel ->
+                                val name = channel.name.trim()
+                                val nameUpper = name.uppercase()
+                                // Buscar exactamente "ESPN | 1 LATINOAMERICA" o variaciones
+                                nameUpper.contains("ESPN | 1 LATINOAMERICA", ignoreCase = true) ||
+                                nameUpper.contains("ESPN 1 LATINOAMERICA", ignoreCase = true) ||
+                                name.equals("ESPN | 1 LATINOAMERICA", ignoreCase = true) ||
+                                name.equals("espn.co", ignoreCase = true) ||
+                                name.uppercase().contains("ESPN.CO", ignoreCase = true)
+                            }
+                            
+                            if (espn != null) {
+                                Log.d("ChannelRepository", "Found ESPN channel in group: ${espn.name}")
+                            }
+                        } catch (e: Exception) {
+                            Log.w("ChannelRepository", "Error searching in ESPN HD PREMIUM group: ${e.message}")
+                        }
+                    }
+                    
+                    // Método 3: Si aún no se encontró, buscar en todos los canales de urlm3u2
+                    if (espn == null) {
+                        try {
+                            val channelsFromUrlm3u2 = liveChannelDao.getChannelsBySource(urlm3u2.id)
+                            Log.d("ChannelRepository", "Searching in ${channelsFromUrlm3u2.size} channels from urlm3u2")
+                            
+                            // Buscar en el grupo "ESPN HD PREMIUM" y con nombre que contenga "ESPN | 1 LATINOAMERICA" o "espn.co"
+                            espn = channelsFromUrlm3u2.firstOrNull { channel ->
+                                val group = channel.group?.trim() ?: ""
+                                val name = channel.name.trim()
+                                val groupUpper = group.uppercase()
+                                val nameUpper = name.uppercase()
+                                
+                                // Verificar que esté en el grupo "ESPN HD PREMIUM"
+                                val isInEspnGroup = groupUpper.contains("ESPN HD PREMIUM", ignoreCase = true) ||
+                                                   groupUpper.equals("ESPN HD PREMIUM", ignoreCase = true)
+                                
+                                // Verificar el nombre del canal
+                                val isEspnChannel = nameUpper.contains("ESPN | 1 LATINOAMERICA", ignoreCase = true) ||
+                                                   nameUpper.contains("ESPN 1 LATINOAMERICA", ignoreCase = true) ||
+                                                   name.equals("ESPN | 1 LATINOAMERICA", ignoreCase = true) ||
+                                                   name.equals("espn.co", ignoreCase = true) ||
+                                                   nameUpper.contains("ESPN.CO", ignoreCase = true)
+                                
+                                isInEspnGroup && isEspnChannel
+                            }
+                            
+                            if (espn != null) {
+                                Log.d("ChannelRepository", "Found ESPN channel in urlm3u2: ${espn.name}, group: ${espn.group}")
+                            }
+                        } catch (e: Exception) {
+                            Log.w("ChannelRepository", "Error searching in urlm3u2 channels: ${e.message}")
+                        }
+                    }
+                    
+                    // Si se encontró el canal ESPN, colocarlo en la posición 6
+                    if (espn != null) {
+                        // Asegurar que tenemos al menos 6 canales (índice 5 es la posición 6)
+                        while (channels.size < 6) {
+                            // Si no hay suficientes canales, agregar uno aleatorio temporal
+                            try {
+                                val tempRandom = liveChannelDao.getRandomChannels(1).firstOrNull()
+                                if (tempRandom != null && tempRandom.id !in existingIds) {
+                                    channels.add(tempRandom)
+                                    existingIds.add(tempRandom.id)
+                                } else {
+                                    break // No hay más canales disponibles
+                                }
+                            } catch (e: Exception) {
+                                break
+                            }
+                        }
+                        
+                        // Reemplazar el canal en la posición 6 (índice 5) con ESPN
+                        if (channels.size > 5) {
+                            // Remover el canal aleatorio de la posición 6
+                            val removedChannel = channels.removeAt(5)
+                            Log.d("ChannelRepository", "Replaced channel at position 6: ${removedChannel.name}")
+                        }
+                        // Insertar ESPN en la posición 6 (índice 5)
+                        channels.add(5, espn)
+                        Log.d("ChannelRepository", "ESPN channel inserted at position 6: ${espn.name}, group: ${espn.group}")
+                    } else {
+                        Log.w("ChannelRepository", "ESPN | 1 LATINOAMERICA not found in ESPN HD PREMIUM group from urlm3u2")
+                    }
+                } else {
+                    Log.w("ChannelRepository", "urlm3u2 not found")
+                }
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading ESPN channel: ${e.message}", e)
             }
             
             // Asegurar máximo 10 canales y retornar (puede ser menos si no hay suficientes canales en la BD)

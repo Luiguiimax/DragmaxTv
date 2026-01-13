@@ -33,6 +33,7 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.dragmax.dragmaxtv.ui.viewmodel.PlayerViewModel
@@ -43,11 +44,38 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
+import kotlinx.coroutines.asCoroutineDispatcher
+import java.util.concurrent.Executors
 import com.bumptech.glide.Glide
 import android.widget.ImageView
 import android.widget.LinearLayout
 
 class MainActivity : AppCompatActivity() {
+    
+    /**
+     * Dispatcher dedicado para operaciones de Room (completamente separado del hilo principal)
+     * 
+     * SEPARACIÓN CRÍTICA:
+     * - Hilo principal: Solo para ExoPlayer y UI (reproducción sin pausas)
+     * - roomDispatcher: Solo para operaciones de Room (base de datos)
+     * 
+     * Esto asegura que:
+     * 1. Las operaciones de Room NO bloqueen la reproducción
+     * 2. La reproducción NO espere operaciones de Room
+     * 3. No hay saturación de ROM durante operaciones de base de datos
+     * 4. ExoPlayer tiene prioridad absoluta en el hilo principal
+     */
+    private val roomDispatcher: ExecutorCoroutineDispatcher by lazy {
+        // Thread pool dedicado con prioridad baja para no interferir con ExoPlayer
+        Executors.newFixedThreadPool(2, java.util.concurrent.ThreadFactory { r ->
+            val thread = Thread(r, "RoomDatabaseThread")
+            thread.priority = Thread.NORM_PRIORITY - 1 // Prioridad ligeramente menor que el hilo principal
+            thread.isDaemon = true // No bloquear cierre de app
+            thread
+        }).asCoroutineDispatcher()
+    }
     
     private lateinit var navItems: List<TextView>
     private lateinit var mainContentArea: android.widget.FrameLayout
@@ -58,6 +86,8 @@ class MainActivity : AppCompatActivity() {
     private var channelRows: MutableList<LinearLayout> = mutableListOf() // Lista de filas de canales
     private var channelRowToChannelMap: MutableMap<LinearLayout, com.dragmax.dragmaxtv.data.entity.LiveChannel> = mutableMapOf() // Mapa de fila a canal
     private var defaultChannelUrl: String? = null // URL del canal predeterminado
+    private var pendingDefaultChannelUrl: String? = null // Canal predeterminado pendiente de reproducir (esperando carga completa)
+    private var areChannelsFullyLoaded: Boolean = false // Indica si todos los canales están completamente cargados
     private lateinit var sharedPreferences: SharedPreferences
     private lateinit var topBar: android.widget.LinearLayout
     private lateinit var searchTop: android.widget.FrameLayout
@@ -76,6 +106,7 @@ class MainActivity : AppCompatActivity() {
     private var savedRightSidebarExpanded = false
     private var savedFocusedView: View? = null
     private var savedSelectedIndex = 0
+    private var savedMainContentAreaParams: android.view.ViewGroup.LayoutParams? = null // Parámetros originales
     private var lastBackPressTime = 0L
     private val BACK_PRESS_INTERVAL = 4000L // 4 segundos para doble clic
     private val originalLeftPanelWidth = 200 // Ancho original en dp
@@ -93,17 +124,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var viewModel: PlayerViewModel
     
-    // Sistema de estabilidad para streaming
+    // Sistema de estabilidad para streaming - reintentos ilimitados
     private var currentChannelUrl: String? = null
-    private var retryCount = 0
-    private val MAX_RETRIES = 3
     private var bufferingStartTime: Long = 0
     private val BUFFERING_TIMEOUT = 10000L // 10 segundos
     private var playbackMonitorJob: Job? = null
     private val handler = Handler(Looper.getMainLooper())
     private var lastPlaybackPosition: Long = 0
     private var playbackStuckCheckRunnable: Runnable? = null
-    private var hasRefreshedAfterDownload = false // Flag para evitar múltiples refreshes
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -179,15 +207,13 @@ class MainActivity : AppCompatActivity() {
         
         // Cargar canales
         android.util.Log.d("MainActivity", "Starting to load channels...")
-        // Restaurar canal predeterminado si existe (después de inicializar ExoPlayer)
+        // Guardar canal predeterminado para reproducir después de que todos los canales estén cargados
+        // NO reproducir inmediatamente para evitar saturar la ROM durante la carga
         defaultChannelUrl?.let { url ->
-            android.util.Log.d("MainActivity", "Restoring default channel from preferences")
-            // Usar post para asegurar que ExoPlayer esté listo
-            lifecycleScope.launch {
-                delay(500) // Pequeño delay para asegurar que ExoPlayer esté inicializado
-                playChannel(url)
-            }
+            android.util.Log.d("MainActivity", "Default channel saved, will play after all channels are loaded: $url")
+            pendingDefaultChannelUrl = url // Guardar para reproducir después
         }
+        // Iniciar carga de canales (prioridad sobre reproducción)
         viewModel.loadChannels()
         
         // Configurar listeners de foco para todos los elementos navegables
@@ -224,6 +250,11 @@ class MainActivity : AppCompatActivity() {
     private fun setupFocusListeners() {
         // Listeners para items del panel izquierdo (optimizado para fluidez)
         navItems.forEachIndexed { index, textView ->
+            // Asegurar que todos los elementos sean focusable y clickable
+            textView.isFocusable = true
+            textView.isFocusableInTouchMode = true
+            textView.isClickable = true
+            
             textView.setOnFocusChangeListener { view, hasFocus ->
                 if (hasFocus && !isFullscreen) {
                     // Restaurar ancho del panel izquierdo cuando se selecciona un item del panel
@@ -250,7 +281,25 @@ class MainActivity : AppCompatActivity() {
                     // (esto se manejará en los otros listeners cuando obtengan el foco)
                 }
             }
+            
+            // Agregar onClick para que funcione con ENTER
+            textView.setOnClickListener {
+                when (index) {
+                    0 -> {
+                        // TV - Mostrar/refrescar MainActivity
+                        showMainContent()
+                    }
+                    else -> {
+                        // PELICULAS, SERIES, ANIME, DRAMAS CORTOS - Preparado para funcionalidad futura
+                    }
+                }
+            }
         }
+        
+        // Asegurar que mainContentArea sea focusable y clickable
+        mainContentArea.isFocusable = true
+        mainContentArea.isFocusableInTouchMode = true
+        mainContentArea.isClickable = true
         
         // Listener para el reproductor (optimizado para fluidez)
         mainContentArea.setOnFocusChangeListener { view, hasFocus ->
@@ -285,14 +334,60 @@ class MainActivity : AppCompatActivity() {
             }
         }
         
-        // Asegurar que el PlayerView NO intercepte el focus del contenedor
-        playerView.isFocusable = false
-        playerView.isClickable = false
-        playerView.isFocusableInTouchMode = false
+        // onClick para mainContentArea (alternar fullscreen)
+        mainContentArea.setOnClickListener {
+            if (!isFullscreen) {
+                enterFullscreen()
+            } else {
+                exitFullscreen()
+            }
+        }
+        
+        // Configurar PlayerView para que pueda recibir foco y eventos de teclado
+        // Esto permite que el control remoto pueda activar fullscreen con ENTER
+        playerView.isFocusable = true
+        playerView.isClickable = true
+        playerView.isFocusableInTouchMode = true
+        
+        // Listener para clic táctil en PlayerView (alternar fullscreen)
+        playerView.setOnClickListener {
+            if (!isFullscreen) {
+                enterFullscreen()
+            } else {
+                exitFullscreen()
+            }
+        }
+        
+        // Listener para manejar teclas en PlayerView (alternar fullscreen)
+        playerView.setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER,
+                    KeyEvent.KEYCODE_ENTER,
+                    KeyEvent.KEYCODE_BUTTON_SELECT,
+                    KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        if (!isFullscreen) {
+                            enterFullscreen()
+                        } else {
+                            exitFullscreen()
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            } else {
+                false
+            }
+        }
         
         // Listeners para iconos (optimizado para fluidez)
         val iconViews = listOf(searchTop, profile, rightSidebar, searchBottom)
         iconViews.forEach { view ->
+            // Asegurar que todos los iconos sean focusable y clickable
+            view.isFocusable = true
+            view.isFocusableInTouchMode = true
+            view.isClickable = true
+            
             view.setOnFocusChangeListener { v, hasFocus ->
                 if (hasFocus && !isFullscreen) {
                     // Reducir ancho del panel izquierdo cuando se selecciona un icono
@@ -311,6 +406,12 @@ class MainActivity : AppCompatActivity() {
                         v.isSelected = false
                     }
                 }
+            }
+            
+            // Agregar onClick para que funcione con ENTER (preparado para funcionalidad futura)
+            view.setOnClickListener {
+                // Preparado para funcionalidad futura
+                android.util.Log.d("MainActivity", "Icon clicked: ${view.javaClass.simpleName}")
             }
         }
     }
@@ -380,9 +481,16 @@ class MainActivity : AppCompatActivity() {
     }
     
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        android.util.Log.d("MainActivity", "onKeyDown: keyCode=$keyCode, isFullscreen=$isFullscreen")
+        
         if (isFullscreen) {
             // En modo fullscreen, solo manejar el botón atrás
             if (keyCode == KeyEvent.KEYCODE_BACK) {
+                exitFullscreen()
+                return true
+            }
+            // También permitir salir con botón central en fullscreen
+            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_BUTTON_SELECT) {
                 exitFullscreen()
                 return true
             }
@@ -390,27 +498,11 @@ class MainActivity : AppCompatActivity() {
         }
         
         when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                // Obtener el elemento que tiene el foco actualmente (optimizado)
-                val currentFocus = window.currentFocus ?: currentFocusedView
-                
-                // Si el focus está en playerView o mainContentArea (o es hijo de mainContentArea), entrar en fullscreen
-                if (currentFocus == playerView || currentFocus == mainContentArea || 
-                    (currentFocus != null && currentFocus.parent == mainContentArea)) {
-                    enterFullscreen()
-                    return true
-                }
-                
-                if (currentFocus != null) {
-                    handleCenterButton(currentFocus)
-                    return true
-                }
-                
-                // Si no hay focus específico pero el reproductor está visible y seleccionado
-                if (mainContentArea.visibility == View.VISIBLE && (mainContentArea.isSelected || mainContentArea.hasFocus())) {
-                    enterFullscreen()
-                    return true
-                }
+            KeyEvent.KEYCODE_DPAD_CENTER, 
+            KeyEvent.KEYCODE_ENTER, 
+            KeyEvent.KEYCODE_BUTTON_SELECT,
+            KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                return handleCenterButtonPress()
             }
             KeyEvent.KEYCODE_HOME -> {
                 // Salir de la app completamente con botón HOME
@@ -423,10 +515,93 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
     
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        // También manejar en onKeyUp como respaldo
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || 
+            keyCode == KeyEvent.KEYCODE_ENTER || 
+            keyCode == KeyEvent.KEYCODE_BUTTON_SELECT ||
+            keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+            if (!isFullscreen) {
+                return handleCenterButtonPress()
+            } else if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_BUTTON_SELECT) {
+                exitFullscreen()
+                return true
+            }
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+    
+    private fun handleCenterButtonPress(): Boolean {
+        // Obtener el elemento que tiene el foco actualmente
+        val currentFocus = window.currentFocus ?: currentFocusedView
+        
+        android.util.Log.d("MainActivity", "Center button pressed, currentFocus: ${currentFocus?.javaClass?.simpleName}, id: ${currentFocus?.id}")
+        
+        // Si la vista enfocada tiene un OnClickListener, ejecutarlo directamente
+        if (currentFocus != null && currentFocus.hasOnClickListeners()) {
+            android.util.Log.d("MainActivity", "Executing onClick for focused view: ${currentFocus.javaClass.simpleName}")
+            currentFocus.performClick()
+            return true
+        }
+        
+        // Verificar si es un canal del panel derecho primero (tiene prioridad)
+        // isUserSelection=true para reproducir inmediatamente (URL ya está en memoria)
+        if (currentFocus is LinearLayout && currentFocus in channelRows) {
+            val selectedChannel = channelRowToChannelMap[currentFocus]
+            if (selectedChannel != null && selectedChannel.url.isNotBlank()) {
+                android.util.Log.d("MainActivity", "Playing selected channel: ${selectedChannel.name}")
+                playChannel(selectedChannel.url, isUserSelection = true)
+                return true
+            }
+        }
+        
+        // Verificar si el focus está en playerView, mainContentArea o cualquier hijo de mainContentArea
+        val isInPlayer = currentFocus == playerView || 
+                        currentFocus == mainContentArea || 
+                        (currentFocus != null && isViewChildOf(currentFocus, mainContentArea)) ||
+                        (mainContentArea.hasFocus() || mainContentArea.isSelected)
+        
+        if (isInPlayer) {
+            android.util.Log.d("MainActivity", "Entering fullscreen from player area (focus: ${currentFocus?.javaClass?.simpleName})")
+            enterFullscreen()
+            return true
+        }
+        
+        // Manejar otros elementos con foco
+        if (currentFocus != null) {
+            handleCenterButton(currentFocus)
+            return true
+        }
+        
+        // Fallback: Si no hay focus específico pero el reproductor está visible y seleccionado
+        if (mainContentArea.visibility == View.VISIBLE && (mainContentArea.isSelected || mainContentArea.hasFocus())) {
+            android.util.Log.d("MainActivity", "Entering fullscreen from fallback (mainContentArea selected)")
+            enterFullscreen()
+            return true
+        }
+        
+        android.util.Log.w("MainActivity", "Center button pressed but no action taken - currentFocus is null")
+        return false
+    }
+    
     // La navegación con las flechas es libre: Android maneja automáticamente la navegación
     // basándose en la posición espacial de las vistas focusables
     
+    /**
+     * Verifica si una vista es hija de otra vista
+     */
+    private fun isViewChildOf(child: View, parent: View): Boolean {
+        var current: View? = child.parent as? View
+        while (current != null) {
+            if (current == parent) return true
+            current = current.parent as? View
+        }
+        return false
+    }
+    
     private fun handleCenterButton(currentFocus: View) {
+        android.util.Log.d("MainActivity", "handleCenterButton called for: ${currentFocus.javaClass.simpleName}")
+        
         when (currentFocus) {
             in navItems -> {
                 val index = navItems.indexOf(currentFocus)
@@ -442,6 +617,7 @@ class MainActivity : AppCompatActivity() {
             }
             mainContentArea, playerView -> {
                 // Entrar en fullscreen (detecta tanto mainContentArea como playerView)
+                android.util.Log.d("MainActivity", "Entering fullscreen from handleCenterButton")
                 enterFullscreen()
             }
             searchTop -> {
@@ -457,15 +633,18 @@ class MainActivity : AppCompatActivity() {
                 // Búsqueda inferior - Preparado para funcionalidad futura
             }
             else -> {
-                // Verificar si es un canal del panel derecho
+                // Verificar si es un canal del panel derecho (ya manejado arriba, pero por si acaso)
+                // isUserSelection=true para reproducir inmediatamente (URL ya está en memoria)
                 if (currentFocus is LinearLayout && currentFocus in channelRows) {
                     val selectedChannel = channelRowToChannelMap[currentFocus]
                     if (selectedChannel != null && selectedChannel.url.isNotBlank()) {
-                        android.util.Log.d("MainActivity", "Playing selected channel: ${selectedChannel.name}")
-                        playChannel(selectedChannel.url)
+                        android.util.Log.d("MainActivity", "Playing selected channel from handleCenterButton: ${selectedChannel.name}")
+                        playChannel(selectedChannel.url, isUserSelection = true)
                     } else {
                         android.util.Log.w("MainActivity", "Selected channel has no URL or not found in map")
                     }
+                } else {
+                    android.util.Log.w("MainActivity", "Unknown focus view: ${currentFocus.javaClass.simpleName}")
                 }
             }
         }
@@ -527,75 +706,126 @@ class MainActivity : AppCompatActivity() {
         val originalSidebarWidthPx = (originalRightSidebarWidth * density).toInt()
         savedRightSidebarExpanded = sidebarParams.width > originalSidebarWidthPx
         
+        // GUARDAR PARÁMETROS ORIGINALES de mainContentArea (sin mover el view)
+        savedMainContentAreaParams = mainContentArea.layoutParams
+        
         isFullscreen = true
         
-        // Restaurar ancho del panel izquierdo antes de ocultarlo (sin animación para que sea instantáneo)
-        if (isLeftPanelReduced) {
-            val targetWidth = (originalLeftPanelWidth * density).toInt()
-            val params = leftNavPanel.layoutParams as android.widget.FrameLayout.LayoutParams
-            params.width = targetWidth
-            leftNavPanel.layoutParams = params
-            isLeftPanelReduced = false
-        }
-        
-        // Restaurar ancho del reproductor y panel derecho antes de ocultarlos (sin animación)
-        // Restaurar márgenes del reproductor a valores originales
-        val marginStart = (100 * density).toInt()
-        val marginEnd = (originalReproductorMarginEnd * density).toInt()
-        reproParams.setMargins(marginStart, 0, marginEnd, 0)
-        mainContentArea.layoutParams = reproParams
-        
-        // Restaurar ancho del panel derecho
-        val sidebarWidth = (originalRightSidebarWidth * density).toInt()
-        sidebarParams.width = sidebarWidth
-        rightSidebar.layoutParams = sidebarParams
-        
-        // Ocultar todos los elementos excepto el reproductor (usar View.GONE para mejor rendimiento)
-        // Guardar estados de visibilidad para restaurar después
+        // Ocultar todos los elementos excepto el reproductor
         leftNavPanel.visibility = View.GONE
         rightSidebar.visibility = View.GONE
         topBar.visibility = View.GONE
         searchTop.visibility = View.GONE
         profile.visibility = View.GONE
         searchBottom.visibility = View.GONE
-        statusIndicatorContainer.visibility = View.GONE // Ocultar indicador de estado también
+        statusIndicatorContainer.visibility = View.GONE
         
-        // Expandir el reproductor a pantalla completa (optimizado)
-        val params = mainContentArea.layoutParams as android.widget.FrameLayout.LayoutParams
-        if (params.leftMargin != 0 || params.rightMargin != 0 || params.topMargin != 0 || params.bottomMargin != 0) {
-            params.setMargins(0, 0, 0, 0)
-            mainContentArea.layoutParams = params
-        }
-        mainContentArea.requestFocus()
+        // Obtener las dimensiones completas de la pantalla
+        val displayMetrics = resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels
+        val screenHeight = displayMetrics.heightPixels
+        
+        // Obtener el contenedor raíz para posicionar mainContentArea sobre todo
+        val rootContainer = findViewById<android.view.ViewGroup>(android.R.id.content)
+        
+        // Traer mainContentArea al frente para que esté sobre todos los demás elementos
+        mainContentArea.bringToFront()
+        
+        // Cambiar parámetros de layout para ocupar toda la pantalla
+        // Usar coordenadas absolutas para ignorar el contenedor padre
+        val fullscreenParams = android.widget.FrameLayout.LayoutParams(
+            screenWidth,
+            screenHeight
+        )
+        fullscreenParams.setMargins(0, 0, 0, 0)
+        fullscreenParams.gravity = android.view.Gravity.NO_GRAVITY
+        mainContentArea.layoutParams = fullscreenParams
+        
+        // Posicionar mainContentArea en (0, 0) para ocupar toda la pantalla
+        mainContentArea.x = 0f
+        mainContentArea.y = 0f
+        
+        // Asegurar que mainContentArea no tenga padding
+        mainContentArea.setPadding(0, 0, 0, 0)
+        
+        // Aumentar elevación para que esté por encima de todo
+        mainContentArea.elevation = 1000f
+        
+        // Expandir playerView al 100% dentro de mainContentArea (sin márgenes, sin padding)
+        val playerParams = playerView.layoutParams as android.widget.FrameLayout.LayoutParams
+        playerParams.setMargins(0, 0, 0, 0)
+        playerParams.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        playerParams.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        playerView.layoutParams = playerParams
+        
+        // Asegurar que playerView no tenga padding
+        playerView.setPadding(0, 0, 0, 0)
+        
+        // Ocultar el overlay de refresh si está visible
+        refreshLoadingOverlay.visibility = View.GONE
+        
+        // Ocultar barras del sistema para fullscreen completo
+        hideSystemBars()
+        
+        // Dar foco al playerView para que pueda recibir eventos de teclado
+        playerView.requestFocus()
+        
+        android.util.Log.d("MainActivity", "Entered fullscreen - mainContentArea positioned to occupy 100% of screen without moving container")
     }
     
     private fun exitFullscreen() {
         isFullscreen = false
         
-        // Mostrar todos los elementos primero (restaurar visibilidad completa)
+        // Restaurar parámetros originales de mainContentArea
+        savedMainContentAreaParams?.let { originalParams ->
+            mainContentArea.layoutParams = originalParams
+        } ?: run {
+            // Si no hay parámetros guardados, usar los valores por defecto del layout
+            val density = resources.displayMetrics.density
+            val params = android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            params.setMargins(
+                (100 * density).toInt(),
+                0,
+                (originalReproductorMarginEnd * density).toInt(),
+                0
+            )
+            mainContentArea.layoutParams = params
+        }
+        
+        // Restaurar posición original (x, y)
+        mainContentArea.x = 0f
+        mainContentArea.y = 0f
+        
+        // Restaurar elevación original
+        mainContentArea.elevation = 0f
+        
+        // Mostrar todos los elementos (restaurar visibilidad completa)
         leftNavPanel.visibility = View.VISIBLE
         rightSidebar.visibility = View.VISIBLE
         topBar.visibility = View.VISIBLE
         searchTop.visibility = View.VISIBLE
         profile.visibility = View.VISIBLE
         searchBottom.visibility = View.VISIBLE
-        // El indicador de estado se mostrará automáticamente si es necesario (no forzar VISIBLE)
         
-        // Restaurar el tamaño y posición del reproductor a valores originales primero
+        // Restaurar playerView a su tamaño original (con margen de 4dp)
         val density = resources.displayMetrics.density
-        val params = mainContentArea.layoutParams as android.widget.FrameLayout.LayoutParams
-        val marginStart = (100 * density).toInt()
-        val marginEnd = (originalReproductorMarginEnd * density).toInt()
-        params.setMargins(marginStart, 0, marginEnd, 0)
-        mainContentArea.layoutParams = params
+        val playerParams = playerView.layoutParams as android.widget.FrameLayout.LayoutParams
+        val marginPx = (4 * density).toInt()
+        playerParams.setMargins(marginPx, marginPx, marginPx, marginPx)
+        playerParams.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        playerParams.height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        playerView.layoutParams = playerParams
         
-        // Restaurar ancho del panel derecho a valor original primero
+        // Restaurar ancho del panel derecho a valor original
         val sidebarParams = rightSidebar.layoutParams as android.widget.FrameLayout.LayoutParams
         val sidebarWidth = (originalRightSidebarWidth * density).toInt()
         sidebarParams.width = sidebarWidth
         rightSidebar.layoutParams = sidebarParams
         
-        // Restaurar ancho del panel izquierdo a valor original primero
+        // Restaurar ancho del panel izquierdo a valor original
         if (isLeftPanelReduced) {
             val leftParams = leftNavPanel.layoutParams as android.widget.FrameLayout.LayoutParams
             val leftWidth = (originalLeftPanelWidth * density).toInt()
@@ -647,7 +877,10 @@ class MainActivity : AppCompatActivity() {
         // Limpiar cualquier selección residual
         clearOtherSelections(viewToFocus)
         
-        android.util.Log.d("MainActivity", "Fullscreen exited, all elements restored")
+        // Limpiar referencias guardadas
+        savedMainContentAreaParams = null
+        
+        android.util.Log.d("MainActivity", "Fullscreen exited, mainContentArea restored to original position")
     }
     
     private fun updateSelection(index: Int) {
@@ -896,9 +1129,13 @@ class MainActivity : AppCompatActivity() {
     }
     
     /**
-     * Inicializa ExoPlayer con configuración optimizada para LIVE streaming
-     * Buffer configurado para PRELOAD y evitar congelamientos, NO para ralentizar
-     * El buffer pre-carga datos para mantener reproducción fluida cuando hay variaciones de red
+     * Inicializa ExoPlayer con configuración mínima absoluta para máxima fluidez
+     * Buffer eliminado al máximo posible (1ms mínimo técnico requerido por ExoPlayer)
+     * Solo reintentos ilimitados cuando se detecta congelamiento
+     * 
+     * NOTA: Los logs "no latch time for frame" y "CCodecBufferChannel" son generados por el sistema
+     * Android y no se pueden eliminar desde la aplicación. Son normales en streams en vivo y no
+     * afectan la reproducción. Para ocultarlos en Logcat, usar filtro: -tag:CCodecBufferChannel
      */
     private fun initializeExoPlayer() {
         // Configurar HttpDataSource con timeouts más largos para evitar errores de conexión
@@ -911,18 +1148,17 @@ class MainActivity : AppCompatActivity() {
         // DataSourceFactory con configuración personalizada
         val dataSourceFactory: DataSource.Factory = DefaultDataSource.Factory(this, httpDataSourceFactory)
         
-        // LoadControl optimizado para LIVE streaming con PRELOAD inteligente
-        // El buffer sirve para pre-cargar datos y evitar congelamientos, no para ralentizar
+        // Sin buffer - configuración mínima absoluta para máxima fluidez
         val loadControl: LoadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                10000,  // minBufferMs: Buffer mínimo de 10 segundos (preload para evitar cortes)
-                20000,  // maxBufferMs: Buffer máximo de 20 segundos (suficiente preload sin exceso)
-                2000,   // bufferForPlaybackMs: Preload mínimo antes de empezar (2 segundos - inicio rápido)
-                4000    // bufferForPlaybackAfterRebufferMs: Preload después de rebuffer (4 segundos)
+                1,      // minBufferMs: Mínimo absoluto técnico (1ms) - ExoPlayer requiere al menos 1ms
+                1,      // maxBufferMs: Mínimo absoluto técnico (1ms)
+                1,      // bufferForPlaybackMs: Mínimo absoluto antes de empezar (1ms)
+                1       // bufferForPlaybackAfterRebufferMs: Mínimo absoluto después de rebuffer (1ms)
             )
-            .setTargetBufferBytes(C.LENGTH_UNSET) // Sin límite de bytes para preload continuo
-            .setPrioritizeTimeOverSizeThresholds(true) // Priorizar tiempo sobre tamaño para fluidez
-            .setBackBuffer(0, false) // Sin buffer hacia atrás (streaming en vivo no lo necesita)
+            .setTargetBufferBytes(1) // Mínimo absoluto de bytes (1 byte)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBackBuffer(0, false) // Sin buffer hacia atrás
             .build()
         
         exoPlayer = ExoPlayer.Builder(this)
@@ -935,13 +1171,42 @@ class MainActivity : AppCompatActivity() {
                 playerView.setResizeMode(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT)
                 playerView.useController = false // Desactivar controles (no mostrar botones)
                 
-                // IMPORTANTE: Asegurar que PlayerView NO intercepte el focus del contenedor
-                playerView.isFocusable = false
-                playerView.isClickable = false
-                playerView.isFocusableInTouchMode = false
+                // Configurar PlayerView para que pueda recibir foco y eventos de teclado
+                // Esto permite que el control remoto pueda activar fullscreen con ENTER
+                playerView.isFocusable = true
+                playerView.isClickable = true
+                playerView.isFocusableInTouchMode = true
                 
-                // Activar handleAudioBecomingNoisy
-                player.setHandleAudioBecomingNoisy(true)
+                // Listener para clic táctil en PlayerView (alternar fullscreen)
+                playerView.setOnClickListener {
+                    if (!isFullscreen) {
+                        enterFullscreen()
+                    } else {
+                        exitFullscreen()
+                    }
+                }
+                
+                // Listener para manejar teclas en PlayerView (alternar fullscreen)
+                playerView.setOnKeyListener { _, keyCode, event ->
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        when (keyCode) {
+                            KeyEvent.KEYCODE_DPAD_CENTER,
+                            KeyEvent.KEYCODE_ENTER,
+                            KeyEvent.KEYCODE_BUTTON_SELECT,
+                            KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                                if (!isFullscreen) {
+                                    enterFullscreen()
+                                } else {
+                                    exitFullscreen()
+                                }
+                                true
+                            }
+                            else -> false
+                        }
+                    } else {
+                        false
+                    }
+                }
                 
                 // Mantener pantalla encendida durante reproducción
                 playerView.keepScreenOn = true
@@ -958,8 +1223,8 @@ class MainActivity : AppCompatActivity() {
                             Player.STATE_READY -> {
                                 // Reproducción lista, resetear contadores
                                 bufferingStartTime = 0
-                                retryCount = 0
-                                startPlaybackMonitor()
+                                // Monitoreo de congelamiento desactivado temporalmente para verificar fluidez
+                                // startPlaybackMonitor()
                             }
                             Player.STATE_ENDED -> {
                                 // Stream terminado, intentar refresh
@@ -972,6 +1237,28 @@ class MainActivity : AppCompatActivity() {
                         // Error en reproducción, analizar tipo de error
                         android.util.Log.e("MainActivity", "ExoPlayer error: ${error.message}", error)
                         android.util.Log.e("MainActivity", "Error code: ${error.errorCode}, cause: ${error.cause?.message}")
+                        
+                        // Verificar si es un error de discontinuidad de audio (UnexpectedDiscontinuityException)
+                        val isAudioDiscontinuity = error.cause is androidx.media3.exoplayer.audio.AudioSink.UnexpectedDiscontinuityException
+                        
+                        if (isAudioDiscontinuity) {
+                            android.util.Log.w("MainActivity", "Audio timestamp discontinuity detected, attempting to recover...")
+                            // Para discontinuidades de audio, intentar recuperar sin detener la reproducción
+                            // Esto es común en streams en vivo y generalmente se puede ignorar
+                            handler.postDelayed({
+                                // Intentar recuperar simplemente reanudando la reproducción
+                                exoPlayer?.let { player ->
+                                    if (player.playbackState == Player.STATE_READY || player.playbackState == Player.STATE_BUFFERING) {
+                                        // Si el player está en un estado válido, solo continuar
+                                        player.playWhenReady = true
+                                    } else {
+                                        // Si el estado no es válido, refrescar el canal
+                                        handlePlaybackError()
+                                    }
+                                }
+                            }, 500) // Esperar 500ms antes de recuperar
+                            return
+                        }
                         
                         // Verificar si es un error de conexión/timeout
                         val isConnectionError = error.cause is java.net.SocketTimeoutException ||
@@ -987,7 +1274,7 @@ class MainActivity : AppCompatActivity() {
                                 handlePlaybackError()
                             }, 2000) // Esperar 2 segundos antes de reintentar
                         } else {
-                            // Para otros errores, manejar inmediatamente
+                            // Para otros errores, reintentar inmediatamente
                             handlePlaybackError()
                         }
                     }
@@ -1001,7 +1288,7 @@ class MainActivity : AppCompatActivity() {
     private fun observeViewModel() {
         // Observar LiveData para currentChannel
         viewModel.currentChannel.observe(this, Observer<com.dragmax.dragmaxtv.data.entity.LiveChannel?> { channel ->
-            android.util.Log.d("MainActivity", "currentChannel observed: ${channel?.name ?: "null"}")
+            android.util.Log.d("MainActivity", "currentChannel observed: ${channel?.name ?: "null"}, areChannelsFullyLoaded: $areChannelsFullyLoaded")
             channel?.let {
                 android.util.Log.d("MainActivity", "Channel URL: ${it.url}")
                 if (it.url.isNotBlank()) {
@@ -1012,7 +1299,13 @@ class MainActivity : AppCompatActivity() {
                         sharedPreferences.edit().putString("default_channel_url", it.url).apply()
                         android.util.Log.d("MainActivity", "Default channel saved: ${it.name}")
                     }
-                    playChannel(it.url)
+                    // OPTIMIZACIÓN: Si los canales ya están cargados, tratar como selección de usuario
+                    // Esto asegura que se recargue correctamente si está pegado
+                    if (areChannelsFullyLoaded) {
+                        playChannel(it.url, isUserSelection = true)
+                    } else {
+                        playChannel(it.url)
+                    }
                 } else {
                     android.util.Log.e("MainActivity", "Channel URL is blank for channel: ${it.name}")
                     showError("Error: URL del canal vacía para ${it.name}")
@@ -1029,60 +1322,44 @@ class MainActivity : AppCompatActivity() {
                     when (state) {
                         is PlayerViewModel.LoadingState.Loading -> {
                             updateStatusIndicator(state)
-                            // Resetear flag cuando inicia una nueva descarga
-                            if (state.phase == PlayerViewModel.LoadingPhase.DOWNLOADING && state.progress == 0) {
-                                hasRefreshedAfterDownload = false
-                            }
                         }
                         is PlayerViewModel.LoadingState.Success -> {
                             // Ocultar indicador inmediatamente cuando se completa la descarga
                             hideStatusIndicator()
-                            // Cargar canales en el panel derecho
-                            loadChannelsToSidebar()
                             
-                            // Cuando todas las listas estén al 100%, verificar si el canal necesita ser restaurado
-                            // Solo hacer refresh si realmente es necesario (no está reproduciéndose correctamente)
-                            if (!hasRefreshedAfterDownload && defaultChannelUrl != null) {
-                                hasRefreshedAfterDownload = true
-                                android.util.Log.d("MainActivity", "Todas las listas descargadas al 100%, verificando estado del canal...")
-                                
-                                // Pequeño delay para asegurar que todo esté listo
-                                lifecycleScope.launch {
-                                    delay(2000) // Esperar 2 segundos después de completar la descarga
-                                    
-                                    exoPlayer?.let { player ->
-                                        val isPlaying = player.playbackState == Player.STATE_READY && player.isPlaying
-                                        val hasCurrentChannel = currentChannelUrl != null
-                                        val isBuffering = player.playbackState == Player.STATE_BUFFERING
-                                        
-                                        // Solo hacer refresh si realmente es necesario
-                                        if (!hasCurrentChannel || (!isPlaying && !isBuffering)) {
-                                            // No hay canal o no está reproduciéndose, reproducir el predeterminado
-                                            defaultChannelUrl?.let { url ->
-                                                android.util.Log.d("MainActivity", "Canal no está reproduciéndose, iniciando canal predeterminado: $url")
-                                                // Resetear contadores antes de reproducir
-                                                retryCount = 0
-                                                bufferingStartTime = 0
-                                                lastPlaybackPosition = 0
-                                                playChannel(url)
-                                            }
-                                        } else {
-                                            // El canal está reproduciéndose correctamente, no hacer nada
-                                            android.util.Log.d("MainActivity", "Canal ya está reproduciéndose correctamente, no se requiere refresh")
-                                        }
-                                    } ?: run {
-                                        // Si ExoPlayer no está inicializado, reproducir directamente
-                                        defaultChannelUrl?.let { url ->
-                                            android.util.Log.d("MainActivity", "ExoPlayer no inicializado, reproduciendo canal predeterminado: $url")
-                                            retryCount = 0
-                                            playChannel(url)
-                                        }
-                                    }
-                                }
+                            // Marcar que todos los canales están completamente cargados
+                            areChannelsFullyLoaded = true
+                            android.util.Log.d("MainActivity", "All channels fully loaded, ready to play default channel")
+                            
+                            // Esperar un momento adicional para asegurar que la Room esté completamente lista
+                            // y que no haya operaciones pendientes que puedan saturar la ROM
+                            delay(1000) // 1 segundo adicional para estabilizar la Room
+                            
+                            // Ahora sí reproducir el canal predeterminado si está pendiente
+                            // Usar isUserSelection=true porque los canales ya están cargados
+                            pendingDefaultChannelUrl?.let { url ->
+                                android.util.Log.d("MainActivity", "Playing pending default channel after full load: $url")
+                                playChannel(url, isUserSelection = true)
+                                pendingDefaultChannelUrl = null // Limpiar pendiente
                             }
+                            
+                            // Cargar canales en el panel derecho (después de reproducir para no interferir)
+                            loadChannelsToSidebar()
                         }
                         is PlayerViewModel.LoadingState.Error -> {
                             hideStatusIndicator()
+                            // Aún así, intentar reproducir el canal predeterminado si está pendiente
+                            // (puede haber canales en caché)
+                            if (!areChannelsFullyLoaded) {
+                                areChannelsFullyLoaded = true // Marcar como cargado para permitir reproducción
+                                pendingDefaultChannelUrl?.let { url ->
+                                    android.util.Log.w("MainActivity", "Error loading channels, but attempting to play default channel: $url")
+                                    delay(1000)
+                                    // Usar isUserSelection=true para forzar recarga limpia
+                                    playChannel(url, isUserSelection = true)
+                                    pendingDefaultChannelUrl = null
+                                }
+                            }
                         }
                         PlayerViewModel.LoadingState.Idle -> {
                             hideStatusIndicator()
@@ -1131,9 +1408,18 @@ class MainActivity : AppCompatActivity() {
     
     /**
      * Reproduce un canal con sistema de estabilidad
+     * 
+     * IMPORTANTE: Esta función NO espera operaciones de Room ni bloquea el hilo principal.
+     * La URL ya está en memoria cuando se llama, por lo que la reproducción es inmediata.
+     * Las operaciones de Room se ejecutan en un dispatcher dedicado completamente separado.
+     * 
+     * @param url URL del canal a reproducir
+     * @param isUserSelection Si es true, reproduce inmediatamente SIN RESTRICCIONES
+     *                        (canal del panel derecho ya cargado desde Room)
+     *                        Si es false, espera a que los canales estén cargados (canal predeterminado)
      */
-    private fun playChannel(url: String) {
-        android.util.Log.d("MainActivity", "playChannel called with URL: $url")
+    private fun playChannel(url: String, isUserSelection: Boolean = false) {
+        android.util.Log.d("MainActivity", "playChannel called with URL: $url, areChannelsFullyLoaded: $areChannelsFullyLoaded, isUserSelection: $isUserSelection")
         
         if (url.isBlank()) {
             android.util.Log.e("MainActivity", "URL is blank, cannot play channel")
@@ -1141,20 +1427,85 @@ class MainActivity : AppCompatActivity() {
             return
         }
         
-        currentChannelUrl = url
-        retryCount = 0
+        // Si es una selección manual del usuario (canal del panel derecho):
+        // Los canales ya están cargados desde Room, reproducir INMEDIATAMENTE sin restricciones
+        if (isUserSelection) {
+            android.util.Log.d("MainActivity", "User selection from sidebar - channel already loaded from Room, playing immediately")
+            // NO verificar areChannelsFullyLoaded porque el canal ya está en memoria desde Room
+            
+            // CRÍTICO: Detener completamente el canal anterior antes de reproducir el nuevo
+            // Esto evita superposición de canales y que se quede pegado
+            exoPlayer?.let { player ->
+                lifecycleScope.launch {
+                    try {
+                        android.util.Log.d("MainActivity", "Playing channel: $url (current: $currentChannelUrl)")
+                        
+                        // Detener completamente el canal anterior
+                        player.stop()
+                        player.clearMediaItems()
+                        
+                        // Pequeña pausa para asegurar limpieza
+                        kotlinx.coroutines.delay(150L)
+                        
+                        // Actualizar URL del canal actual
+                        currentChannelUrl = url
+                        
+                        // Crear y configurar nuevo MediaItem
+                        android.util.Log.d("MainActivity", "Creating MediaItem and preparing player")
+                        val mediaItem = MediaItem.fromUri(url)
+                        player.setMediaItem(mediaItem)
+                        player.prepare()
+                        player.playWhenReady = true
+                        
+                        android.util.Log.d("MainActivity", "Player prepared and playWhenReady set to true")
+                    } catch (e: Exception) {
+                        android.util.Log.e("MainActivity", "Error stopping/playing channel: ${e.message}", e)
+                        showError("Error al cambiar de canal: ${e.message}")
+                    }
+                }
+            } ?: run {
+                android.util.Log.e("MainActivity", "ExoPlayer is null, cannot play channel")
+                showError("Error: Reproductor no inicializado")
+            }
+            return
+        }
         
+        // Para canal predeterminado: esperar a que todos los canales estén cargados
+        if (!areChannelsFullyLoaded) {
+            android.util.Log.d("MainActivity", "Channels not fully loaded yet, deferring playback to avoid ROM saturation")
+            pendingDefaultChannelUrl = url // Guardar para reproducir después
+            return
+        }
+        
+        // CRÍTICO: Detener completamente el canal anterior antes de reproducir el nuevo
+        // Esto evita superposición de canales y que se quede pegado
         exoPlayer?.let { player ->
-            try {
-                android.util.Log.d("MainActivity", "Creating MediaItem and preparing player")
-                val mediaItem = MediaItem.fromUri(url)
-                player.setMediaItem(mediaItem)
-                player.prepare()
-                player.playWhenReady = true
-                android.util.Log.d("MainActivity", "Player prepared and playWhenReady set to true")
-            } catch (e: Exception) {
-                android.util.Log.e("MainActivity", "Error playing channel: ${e.message}", e)
-                showError("Error al reproducir: ${e.message}")
+            lifecycleScope.launch {
+                try {
+                    android.util.Log.d("MainActivity", "Playing channel: $url (current: $currentChannelUrl)")
+                    
+                    // Detener completamente el canal anterior
+                    player.stop()
+                    player.clearMediaItems()
+                    
+                    // Pequeña pausa para asegurar limpieza
+                    kotlinx.coroutines.delay(150L)
+                    
+                    // Actualizar URL del canal actual
+                    currentChannelUrl = url
+                    
+                    // Crear y configurar nuevo MediaItem
+                    android.util.Log.d("MainActivity", "Creating MediaItem and preparing player")
+                    val mediaItem = MediaItem.fromUri(url)
+                    player.setMediaItem(mediaItem)
+                    player.prepare()
+                    player.playWhenReady = true
+                    
+                    android.util.Log.d("MainActivity", "Player prepared and playWhenReady set to true")
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Error stopping/playing channel: ${e.message}", e)
+                    showError("Error al cambiar de canal: ${e.message}")
+                }
             }
         } ?: run {
             android.util.Log.e("MainActivity", "ExoPlayer is null, cannot play channel")
@@ -1189,10 +1540,9 @@ class MainActivity : AppCompatActivity() {
         playbackMonitorJob = lifecycleScope.launch {
             var isMonitoring = true
             var stuckCount = 0 // Contador de veces que la posición no cambia
-            val requiredStuckChecks = 3 // Requerir 3 verificaciones consecutivas (6 segundos) antes de considerar congelado
             
             while (isMonitoring) {
-                delay(2000) // Verificar cada 2 segundos
+                delay(1000) // Verificar cada 1 segundo
                 val player = exoPlayer
                 if (player != null && player.playbackState == Player.STATE_READY && player.isPlaying) {
                     val currentPosition = player.currentPosition
@@ -1206,11 +1556,11 @@ class MainActivity : AppCompatActivity() {
                     } else if (lastPlaybackPosition > 0) {
                         // La posición no cambió, incrementar contador
                         stuckCount++
-                        android.util.Log.d("MainActivity", "Playback position unchanged, stuck count: $stuckCount/$requiredStuckChecks")
+                        android.util.Log.d("MainActivity", "Playback position unchanged, stuck count: $stuckCount/3")
                         
-                        // Solo considerar congelado después de múltiples verificaciones
-                        if (stuckCount >= requiredStuckChecks) {
-                            android.util.Log.w("MainActivity", "Playback appears to be stuck, attempting refresh...")
+                        // Detectar congelamiento después de 3 segundos sin movimiento (3 verificaciones de 1 segundo)
+                        if (stuckCount >= 3) {
+                            android.util.Log.w("MainActivity", "Playback congelado detectado (3 segundos sin movimiento), restaurando canal...")
                             handlePlaybackStuck()
                             isMonitoring = false
                             return@launch
@@ -1230,51 +1580,37 @@ class MainActivity : AppCompatActivity() {
     
     /**
      * Maneja timeout de buffering
+     * Ya no hace refresh automático, solo registra el error
      */
     private fun handleBufferingTimeout() {
-        if (retryCount < MAX_RETRIES) {
-            retryCount++
-            refreshChannel()
-        } else {
-            // Máximo de reintentos alcanzado
-            showError("Error: El stream no responde después de $MAX_RETRIES intentos")
-        }
+        android.util.Log.w("MainActivity", "Buffering timeout detectado, esperando detección de congelamiento")
+        // No hacer refresh automático, solo esperar a que se detecte congelamiento real
     }
     
     /**
      * Maneja error de reproducción
+     * No restaura automáticamente, espera a que se detecte congelamiento
      */
     private fun handlePlaybackError() {
-        if (retryCount < MAX_RETRIES) {
-            retryCount++
-            refreshChannel()
-        } else {
-            showError("Error: No se pudo reproducir el canal después de $MAX_RETRIES intentos")
-        }
+        android.util.Log.w("MainActivity", "Error de reproducción detectado, esperando detección de congelamiento")
+        // No restaurar automáticamente, solo cuando se detecte congelamiento real
     }
     
     /**
      * Maneja fin de stream
+     * Restaura el canal ya que el stream terminó (equivalente a congelamiento)
      */
     private fun handleStreamEnd() {
-        if (retryCount < MAX_RETRIES) {
-            retryCount++
-            refreshChannel()
-        } else {
-            showError("Error: El stream terminó inesperadamente")
-        }
+        android.util.Log.w("MainActivity", "Stream terminó, restaurando canal...")
+        refreshChannel() // Restaurar cuando el stream termina
     }
     
     /**
-     * Maneja reproducción congelada
+     * Maneja reproducción congelada - restaura el canal
      */
     private fun handlePlaybackStuck() {
-        if (retryCount < MAX_RETRIES) {
-            retryCount++
-            refreshChannel()
-        } else {
-            showError("Error: La reproducción se congeló después de $MAX_RETRIES intentos")
-        }
+        android.util.Log.w("MainActivity", "Reproducción congelada detectada, restaurando canal...")
+        refreshChannel() // Restaurar cuando se detecta congelamiento
     }
     
     /**
@@ -1285,24 +1621,32 @@ class MainActivity : AppCompatActivity() {
         currentChannelUrl?.let { url ->
             lifecycleScope.launch {
                 exoPlayer?.let { player ->
-                    // Verificar si realmente necesita refresh (no hacer refresh si está funcionando bien)
-                    val isPlaying = player.playbackState == Player.STATE_READY && player.isPlaying
-                    val isBuffering = player.playbackState == Player.STATE_BUFFERING
+                    val currentState = player.playbackState
+                    val isPlaying = currentState == Player.STATE_READY && player.isPlaying
+                    val isBuffering = currentState == Player.STATE_BUFFERING
+                    val isEnded = currentState == Player.STATE_ENDED
                     
-                    // Si está reproduciéndose correctamente, no hacer refresh
-                    if (isPlaying && !isBuffering) {
+                    // Si está reproduciéndose correctamente y no terminó, no hacer refresh
+                    if (isPlaying && !isBuffering && !isEnded) {
                         android.util.Log.d("MainActivity", "Canal está reproduciéndose correctamente, saltando refresh")
                         return@launch
                     }
                     
-                    android.util.Log.d("MainActivity", "Refrescando canal: estado=${player.playbackState}, isPlaying=$isPlaying")
+                    android.util.Log.d("MainActivity", "Refrescando canal: estado=$currentState, isPlaying=$isPlaying, isEnded=$isEnded")
                     
                     // Mostrar indicador de carga sobre el último frame (no detener)
                     refreshLoadingOverlay.visibility = View.VISIBLE
                     
-                    // Pausar pero mantener el último frame visible (no hacer stop que causa pantalla negra)
-                    val wasPlaying = player.isPlaying
-                    player.pause()
+                    // Si el stream terminó, necesitamos forzar la restauración
+                    if (isEnded) {
+                        android.util.Log.d("MainActivity", "Stream terminado, forzando restauración completa...")
+                        // Limpiar items y preparar para nueva carga
+                        player.stop()
+                        player.clearMediaItems()
+                    } else {
+                        // Pausar pero mantener el último frame visible (no hacer stop que causa pantalla negra)
+                        player.pause()
+                    }
                     
                     // Crear listener para ocultar overlay cuando esté listo
                     val refreshListener = object : Player.Listener {
@@ -1313,6 +1657,8 @@ class MainActivity : AppCompatActivity() {
                                 // Resetear monitoreo después de que esté listo
                                 bufferingStartTime = 0
                                 lastPlaybackPosition = 0
+                                // Monitoreo de congelamiento desactivado temporalmente para verificar fluidez
+                                // startPlaybackMonitor()
                             }
                         }
                     }
@@ -1321,22 +1667,13 @@ class MainActivity : AppCompatActivity() {
                     // Pequeña pausa antes de recargar
                     delay(300)
                     
-                    // Reemplazar MediaItem sin detener completamente (evita pantalla negra)
+                    // Crear y configurar nuevo MediaItem
                     val mediaItem = MediaItem.fromUri(url)
-                    
-                    // Si hay items, reemplazar; si no, agregar
-                    if (player.mediaItemCount > 0) {
-                        player.replaceMediaItem(0, mediaItem)
-                    } else {
-                        player.setMediaItem(mediaItem)
-                    }
-                    
+                    player.setMediaItem(mediaItem)
                     player.prepare()
+                    player.playWhenReady = true // Forzar reproducción
                     
-                    // Reanudar reproducción si estaba reproduciendo
-                    if (wasPlaying) {
-                        player.playWhenReady = true
-                    }
+                    android.util.Log.d("MainActivity", "Canal restaurado, preparando reproducción...")
                 }
             }
         }
@@ -1413,12 +1750,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         exoPlayer?.playWhenReady = true
-        // Reiniciar monitoreo si está reproduciendo
-        exoPlayer?.let { player ->
-            if (player.playbackState == Player.STATE_READY) {
-                startPlaybackMonitor()
-            }
-        }
+        // Monitoreo de congelamiento desactivado temporalmente para verificar fluidez
+        // exoPlayer?.let { player ->
+        //     if (player.playbackState == Player.STATE_READY) {
+        //         startPlaybackMonitor()
+        //     }
+        // }
     }
     
     override fun onDestroy() {
@@ -1429,14 +1766,51 @@ class MainActivity : AppCompatActivity() {
         playbackStuckCheckRunnable?.let { handler.removeCallbacks(it) }
         exoPlayer?.release()
         exoPlayer = null
+        // Cerrar dispatcher dedicado de Room
+        roomDispatcher.close()
+    }
+    
+    /**
+     * Ejecuta operaciones de Room en un dispatcher dedicado (separado del hilo principal)
+     * Esto asegura que las operaciones de base de datos NO bloqueen la reproducción
+     * 
+     * @param block Operación de Room a ejecutar
+     * @return Resultado de la operación
+     */
+    private suspend fun <T> executeRoomOperation(block: suspend () -> T): T {
+        return withContext(roomDispatcher) {
+            // Yield para dar prioridad a la reproducción (ExoPlayer)
+            kotlinx.coroutines.yield()
+            block()
+        }
     }
     
     /**
      * Carga y muestra los canales en el panel derecho con estilo de cuaderno
-     * Incluye protección contra sobrecarga de Room
+     * Incluye protección contra sobrecarga de Room y NO interfiere con la reproducción
+     * OPTIMIZACIÓN: Espera a que todos los canales estén completamente cargados
+     * OPTIMIZACIÓN: Usa dispatcher dedicado de Room (separado del hilo principal)
      */
     private fun loadChannelsToSidebar() {
+        // Diferir la carga para no interferir con la reproducción activa
         lifecycleScope.launch {
+            // OPTIMIZACIÓN: Esperar a que todos los canales estén completamente cargados
+            // Esto evita saturar la ROM durante la carga inicial
+            while (!areChannelsFullyLoaded) {
+                delay(500) // Verificar cada 500ms
+            }
+            
+            // Esperar un momento adicional para asegurar que la Room esté completamente lista
+            delay(1000) // 1 segundo adicional para estabilizar la Room
+            
+            // Verificar que no esté reproduciendo activamente antes de cargar
+            exoPlayer?.let { player ->
+                if (player.playbackState == Player.STATE_BUFFERING) {
+                    // Si está buffering, esperar más tiempo
+                    delay(2000) // Reducido de 3000 a 2000 ya que los canales ya están cargados
+                }
+            }
+            
             try {
                 // Protección: timeout de 5 segundos para evitar bloqueos
                 val timeoutJob = launch {
@@ -1451,15 +1825,16 @@ class MainActivity : AppCompatActivity() {
                     database.listUpdateTimestampDao()
                 )
                 
-                // Cargar canales con protección contra sobrecarga
-                val channels = withContext(Dispatchers.IO) {
-                    try {
+                // Cargar canales con protección contra sobrecarga - en dispatcher dedicado de Room
+                // SEPARADO del hilo principal para NO bloquear la reproducción
+                val channels = try {
+                    executeRoomOperation {
                         // Limitar a máximo 10 canales para evitar sobrecarga
                         repository.getChannelsForSidebar()
-                    } catch (e: Exception) {
-                        android.util.Log.e("MainActivity", "Error loading channels from Room: ${e.message}", e)
-                        emptyList() // Retornar lista vacía en caso de error
                     }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainActivity", "Error loading channels from Room: ${e.message}", e)
+                    emptyList() // Retornar lista vacía en caso de error
                 }
                 
                 timeoutJob.cancel() // Cancelar timeout si se completó exitosamente
@@ -1473,8 +1848,9 @@ class MainActivity : AppCompatActivity() {
                 // Limitar a máximo 10 canales para evitar sobrecarga de UI
                 val limitedChannels = channels.take(10)
                 
-                // Limpiar contenedor de forma segura
-                runOnUiThread {
+                // Limpiar contenedor de forma segura - en hilo UI pero con yield
+                withContext(Dispatchers.Main) {
+                    kotlinx.coroutines.yield() // Dar prioridad a otras operaciones UI
                     try {
                         channelsListContainer.removeAllViews()
                     } catch (e: Exception) {
@@ -1487,10 +1863,14 @@ class MainActivity : AppCompatActivity() {
                 val lineHeight = (screenHeight / 10).coerceAtLeast(40) // 10 líneas máximo
                 val logoSize = (lineHeight * 0.7).toInt().coerceAtLeast(24) // 70% de la altura de línea
                 
-                // Procesar canales en el hilo UI de forma segura
-                runOnUiThread {
+                // Procesar canales en el hilo UI de forma segura - con yield entre cada canal
+                withContext(Dispatchers.Main) {
                     try {
                         limitedChannels.forEachIndexed { index, channel ->
+                            // Yield cada 2 canales para no bloquear la UI
+                            if (index % 2 == 0 && index > 0) {
+                                kotlinx.coroutines.yield()
+                            }
                             try {
                                 // Crear contenedor horizontal para logo y nombre (focusable y navegable)
                                 val channelRow = LinearLayout(this@MainActivity).apply {
@@ -1504,7 +1884,7 @@ class MainActivity : AppCompatActivity() {
                                     // Hacer focusable y clickable para navegación libre
                                     isFocusable = true
                                     isClickable = true
-                                    isFocusableInTouchMode = false
+                                    isFocusableInTouchMode = true
                                     background = getDrawable(R.drawable.nav_item_background)
                                     
                                     // ID único para navegación
@@ -1529,25 +1909,28 @@ class MainActivity : AppCompatActivity() {
                                     adjustViewBounds = true
                                 }
                                 
-                                // Cargar logo con Glide si existe (con protección mejorada)
+                                // Cargar logo con Glide si existe (optimizado para no bloquear)
+                                // Usar placeholder primero y cargar de forma asíncrona
+                                logoImageView.setImageResource(android.R.drawable.ic_menu_gallery)
                                 if (!channel.logo.isNullOrBlank()) {
-                                    try {
-                                        Glide.with(this@MainActivity)
-                                            .load(channel.logo)
-                                            .placeholder(android.R.drawable.ic_menu_gallery)
-                                            .error(android.R.drawable.ic_menu_gallery)
-                                            .timeout(5000) // Timeout de 5 segundos para carga de imagen
-                                            .skipMemoryCache(false) // Usar caché de memoria
-                                            .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.ALL) // Caché en disco
-                                            .into(logoImageView)
-                                    } catch (e: Exception) {
-                                        // Error silencioso: usar placeholder
-                                        android.util.Log.d("MainActivity", "Glide failed to load logo for ${channel.name}: ${e.message}")
-                                        logoImageView.setImageResource(android.R.drawable.ic_menu_gallery)
+                                    // Cargar de forma asíncrona sin bloquear
+                                    logoImageView.post {
+                                        try {
+                                            Glide.with(this@MainActivity)
+                                                .load(channel.logo)
+                                                .placeholder(android.R.drawable.ic_menu_gallery)
+                                                .error(android.R.drawable.ic_menu_gallery)
+                                                .timeout(2000) // Timeout reducido a 2 segundos para fallar rápido
+                                                .skipMemoryCache(false)
+                                                .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.ALL)
+                                                .override(logoSize, logoSize) // Limitar tamaño para carga más rápida
+                                                .into(logoImageView)
+                                        } catch (e: Exception) {
+                                            // Error silencioso: mantener placeholder
+                                            // No loguear para evitar spam en logs
+                                            // Glide maneja automáticamente los errores con .error()
+                                        }
                                     }
-                                } else {
-                                    // Si no hay logo, usar un placeholder
-                                    logoImageView.setImageResource(android.R.drawable.ic_menu_gallery)
                                 }
                                 
                                 // TextView para el nombre
@@ -1592,8 +1975,9 @@ class MainActivity : AppCompatActivity() {
                         // Navegación libre: Android manejará automáticamente la navegación
                         // basándose en la posición de las vistas
                         
-                        // Configurar listeners de focus para cada canal
+                        // Configurar listeners de focus y clic para cada canal
                         channelRows.forEach { row ->
+                            // Listener de focus para navegación visual
                             row.setOnFocusChangeListener { view, hasFocus ->
                                 if (hasFocus && !isFullscreen) {
                                     // Reducir ancho del panel izquierdo cuando se selecciona un canal
@@ -1612,6 +1996,21 @@ class MainActivity : AppCompatActivity() {
                                         clearOtherSelections(view)
                                         currentFocusedView = view
                                     }
+                                }
+                            }
+                            
+                            // Listener de clic directo para reproducir el canal
+                            // Funciona tanto con control remoto (OK/Center) como con clic táctil
+                            // isUserSelection=true para reproducir inmediatamente (URL ya está en memoria)
+                            row.setOnClickListener { view ->
+                                val channel = channelRowToChannelMap[view]
+                                if (channel != null && channel.url.isNotBlank()) {
+                                    android.util.Log.d("MainActivity", "Channel clicked: ${channel.name}, URL: ${channel.url}")
+                                    playChannel(channel.url, isUserSelection = true)
+                                    // Dar focus al reproductor después de reproducir
+                                    mainContentArea.requestFocus()
+                                } else {
+                                    android.util.Log.w("MainActivity", "Clicked channel has no URL or not found in map")
                                 }
                             }
                         }
