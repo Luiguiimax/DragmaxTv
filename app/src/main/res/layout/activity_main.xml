@@ -26,9 +26,7 @@
             android:background="@drawable/icon_background_selector"
             android:focusable="true"
             android:clickable="true"
-            android:padding="8dp"
-            android:nextFocusDown="@id/tvNavItem1"
-            android:nextFocusRight="@id/flProfile">
+            android:padding="8dp">
             <ImageView
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
@@ -45,9 +43,7 @@
             android:background="@drawable/icon_background_selector"
             android:focusable="true"
             android:clickable="true"
-            android:padding="8dp"
-            android:nextFocusDown="@id/tvNavItem1"
-            android:nextFocusLeft="@id/flSearchTop">
+            android:padding="8dp">
             <ImageView
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
@@ -89,9 +85,8 @@
                 android:padding="12dp"
                 android:focusable="true"
                 android:clickable="true"
-                android:nextFocusUp="@id/flSearchTop"
-                android:nextFocusDown="@id/tvNavItem2"
-                android:nextFocusRight="@id/mainContentArea"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:layout_marginBottom="16dp" />
 
             <TextView
@@ -106,9 +101,8 @@
                 android:padding="12dp"
                 android:focusable="true"
                 android:clickable="true"
-                android:nextFocusUp="@id/tvNavItem1"
-                android:nextFocusDown="@id/tvNavItem3"
-                android:nextFocusRight="@id/mainContentArea"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:layout_marginBottom="16dp" />
 
             <TextView
@@ -123,9 +117,8 @@
                 android:padding="12dp"
                 android:focusable="true"
                 android:clickable="true"
-                android:nextFocusUp="@id/tvNavItem2"
-                android:nextFocusDown="@id/tvNavItem4"
-                android:nextFocusRight="@id/mainContentArea"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:layout_marginBottom="16dp" />
 
             <TextView
@@ -140,9 +133,8 @@
                 android:padding="12dp"
                 android:focusable="true"
                 android:clickable="true"
-                android:nextFocusUp="@id/tvNavItem3"
-                android:nextFocusDown="@id/tvNavItem5"
-                android:nextFocusRight="@id/mainContentArea"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:layout_marginBottom="16dp" />
 
             <TextView
@@ -157,9 +149,8 @@
                 android:padding="12dp"
                 android:focusable="true"
                 android:clickable="true"
-                android:nextFocusUp="@id/tvNavItem4"
-                android:nextFocusDown="@id/mainContentArea"
-                android:nextFocusRight="@id/mainContentArea" />
+                android:maxLines="1"
+                android:ellipsize="end" />
         </LinearLayout>
 
         <!-- Área de contenido principal (reproductor) - por debajo del panel izquierdo -->
@@ -173,23 +164,38 @@
             android:padding="0dp"
             android:elevation="0dp"
             android:focusable="true"
-            android:clickable="true"
-            android:nextFocusUp="@id/tvNavItem1"
-            android:nextFocusDown="@id/flSearchBottom"
-            android:nextFocusLeft="@id/tvNavItem1"
-            android:nextFocusRight="@id/rightSidebar">
+            android:clickable="true">
 
-            <!-- ExoPlayer PlayerView -->
+            <!-- ExoPlayer PlayerView con padding para que sobresalgan los bordes del padre -->
             <androidx.media3.ui.PlayerView
                 android:id="@+id/playerView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
+                android:layout_margin="4dp"
                 android:background="#000000"
+                android:focusable="false"
+                android:clickable="false"
                 app:resize_mode="fit"
-                app:use_controller="true" />
+                app:use_controller="false" />
+            
+            <!-- Indicador de carga durante refresh (inicialmente oculto) -->
+            <FrameLayout
+                android:id="@+id/refreshLoadingOverlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="#80000000"
+                android:visibility="gone"
+                android:gravity="center">
+                
+                <ProgressBar
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
+                    android:indeterminateTint="#FFFFFF" />
+            </FrameLayout>
+            
         </FrameLayout>
 
-        <!-- Sidebar derecho - Lista de canales (como estaba antes) -->
+        <!-- Sidebar derecho - Lista de canales estilo cuaderno -->
         <LinearLayout
             android:id="@+id/rightSidebar"
             android:layout_width="120dp"
@@ -198,22 +204,36 @@
             android:layout_marginEnd="24dp"
             android:orientation="vertical"
             android:background="@drawable/sidebar_background_selector"
-            android:gravity="center"
-            android:padding="16dp"
-            android:focusable="true"
-            android:clickable="true"
-            android:nextFocusUp="@id/tvNavItem1"
-            android:nextFocusDown="@id/flSearchBottom"
-            android:nextFocusLeft="@id/mainContentArea">
+            android:padding="8dp"
+            android:focusable="false"
+            android:clickable="false"
+            android:focusableInTouchMode="false">
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="lista de canales"
-                android:textColor="#FFFFFF"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:gravity="center" />
+            <!-- Contenedor con estilo de cuaderno (rayas) -->
+            <ScrollView
+                android:id="@+id/channelsScrollView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/notebook_lines"
+                android:fillViewport="true"
+                android:scrollbars="none"
+                android:fadeScrollbars="true"
+                android:scrollbarStyle="insideOverlay"
+                android:overScrollMode="never">
+
+                <LinearLayout
+                    android:id="@+id/channelsListContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingStart="4dp"
+                    android:paddingEnd="4dp"
+                    android:paddingTop="8dp"
+                    android:paddingBottom="8dp">
+
+                    <!-- Los canales se agregarán aquí dinámicamente -->
+                </LinearLayout>
+            </ScrollView>
         </LinearLayout>
     </FrameLayout>
 
@@ -227,10 +247,7 @@
         android:background="@drawable/icon_background_selector"
         android:focusable="true"
         android:clickable="true"
-        android:padding="8dp"
-        android:nextFocusUp="@id/mainContentArea"
-        android:nextFocusLeft="@id/tvNavItem1"
-        android:nextFocusRight="@id/rightSidebar">
+        android:padding="8dp">
         <ImageView
             android:layout_width="match_parent"
             android:layout_height="match_parent"

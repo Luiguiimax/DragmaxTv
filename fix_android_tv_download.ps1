@@ -32,3 +32,5 @@ Write-Host "`nO ejecuta este comando en PowerShell (como Admin):" -ForegroundCol
 Write-Host "cd `"$sdkPath\cmdline-tools\latest\bin`"" -ForegroundColor Cyan
 Write-Host ".\sdkmanager.bat `"system-images;android-36;android-tv;x86`"" -ForegroundColor Cyan
 
+
+

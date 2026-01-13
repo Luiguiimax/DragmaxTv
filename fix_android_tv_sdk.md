@@ -36,3 +36,5 @@ cd "C:\Users\luigu\AppData\Local\Android\Sdk\cmdline-tools\latest\bin"
 .\sdkmanager.bat "system-images;android-36;android-tv;x86"
 ```
 
+
+

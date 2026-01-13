@@ -13,3 +13,5 @@ data class M3UUrl(
     val content: String? = null // Contenido descargado del M3U
 )
 
+
+

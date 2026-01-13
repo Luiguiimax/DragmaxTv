@@ -528,5 +528,130 @@ class ChannelRepository(
     fun getAllLiveChannels(): Flow<List<LiveChannel>> {
         return liveChannelDao.getAllChannels()
     }
+    
+    /**
+     * Busca un canal por nombre (sin importar el grupo)
+     */
+    suspend fun findChannelByName(channelName: String): LiveChannel? = withContext(Dispatchers.IO) {
+        // Intentar búsqueda con LIKE
+        var channel = liveChannelDao.getChannelByName("%$channelName%")
+        if (channel != null) return@withContext channel
+        
+        // Si no se encuentra, intentar variaciones
+        val variations = listOf(
+            "$channelName%",
+            "%$channelName"
+        )
+        for (variation in variations) {
+            channel = liveChannelDao.getChannelByName(variation)
+            if (channel != null) return@withContext channel
+        }
+        null
+    }
+    
+    /**
+     * Obtiene canales aleatorios
+     */
+    suspend fun getRandomChannels(count: Int): List<LiveChannel> = withContext(Dispatchers.IO) {
+        liveChannelDao.getRandomChannels(count)
+    }
+    
+    /**
+     * Obtiene la lista de canales para el panel derecho
+     * Incluye: Caracol FHD, Win Sports + FHD, RCN FHD, NTN24, DIRECTV SPORTS 2 CO, y canales aleatorios
+     * Protegido contra sobrecarga de Room
+     */
+    suspend fun getChannelsForSidebar(): List<LiveChannel> = withContext(Dispatchers.IO) {
+        try {
+            val channels = mutableListOf<LiveChannel>()
+            
+            // 1. Caracol FHD (COLOMBIA) - con protección
+            try {
+                val caracol = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "Caracol FHD")
+                if (caracol != null) channels.add(caracol)
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading Caracol FHD: ${e.message}")
+            }
+            
+            // 2. Win Sports + FHD (buscar en COLOMBIA) - con protección
+            try {
+                val winSports = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "Win Sports + FHD")
+                    ?: findChannelByName("Win Sports + FHD")
+                if (winSports != null) channels.add(winSports)
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading Win Sports + FHD: ${e.message}")
+            }
+            
+            // 3. RCN FHD (buscar en COLOMBIA) - con protección
+            try {
+                val rcn = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "RCN FHD")
+                    ?: findChannelByName("RCN FHD")
+                if (rcn != null) channels.add(rcn)
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading RCN FHD: ${e.message}")
+            }
+            
+            // 4. NTN24 (buscar en COLOMBIA) - con protección
+            try {
+                val ntn24 = liveChannelDao.getChannelByGroupAndName("COLOMBIA", "NTN24")
+                    ?: findChannelByName("NTN24")
+                if (ntn24 != null) channels.add(ntn24)
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading NTN24: ${e.message}")
+            }
+            
+            // 5. DIRECTV SPORTS 2 CO (buscar en cualquier grupo) - con protección
+            try {
+                val directv = findChannelByName("DIRECTV SPORTS 2 CO")
+                    ?: findChannelByName("DIRECTV SPORTS 2")
+                if (directv != null) channels.add(directv)
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading DIRECTV SPORTS 2 CO: ${e.message}")
+            }
+            
+            // 6. Completar hasta 10 con canales aleatorios (excluyendo los ya agregados) - con protección
+            try {
+                val existingIds = channels.map { it.id }.toMutableSet() // MutableSet para poder agregar IDs
+                val needed = 10 - channels.size
+                
+                if (needed > 0) {
+                    // Obtener más canales aleatorios de los necesarios para tener opciones
+                    // Obtener al menos 30 canales aleatorios para tener suficientes opciones únicas
+                    val randomChannels = liveChannelDao.getRandomChannels(30)
+                    
+                    for (randomChannel in randomChannels) {
+                        if (channels.size >= 10) break
+                        // Solo agregar si no está ya en la lista
+                        if (randomChannel.id !in existingIds) {
+                            channels.add(randomChannel)
+                            existingIds.add(randomChannel.id) // Actualizar set de IDs existentes
+                        }
+                    }
+                    
+                    // Si aún no hay 10 canales después de la primera ronda, intentar otra vez con más canales
+                    if (channels.size < 10) {
+                        val stillNeeded = 10 - channels.size
+                        val moreRandomChannels = liveChannelDao.getRandomChannels(stillNeeded * 5) // Obtener 5 veces más de los necesarios
+                        for (randomChannel in moreRandomChannels) {
+                            if (channels.size >= 10) break
+                            if (randomChannel.id !in existingIds) {
+                                channels.add(randomChannel)
+                                existingIds.add(randomChannel.id)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("ChannelRepository", "Error loading random channels: ${e.message}")
+            }
+            
+            // Asegurar máximo 10 canales y retornar (puede ser menos si no hay suficientes canales en la BD)
+            Log.d("ChannelRepository", "Total channels for sidebar: ${channels.size}")
+            channels.take(10)
+        } catch (e: Exception) {
+            Log.e("ChannelRepository", "Error in getChannelsForSidebar: ${e.message}", e)
+            emptyList() // Retornar lista vacía en caso de error crítico
+        }
+    }
 }
 

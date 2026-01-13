@@ -23,7 +23,16 @@ interface LiveChannelDao {
     
     @Query("SELECT * FROM live_channels WHERE `group` = :groupName ORDER BY id ASC LIMIT 1")
     suspend fun getFirstChannelByGroup(groupName: String): LiveChannel?
-    
+
+    @Query("SELECT * FROM live_channels WHERE name LIKE :channelName LIMIT 1")
+    suspend fun getChannelByName(channelName: String): LiveChannel?
+
+    @Query("SELECT * FROM live_channels WHERE name LIKE :channelName OR name LIKE :channelName2 LIMIT 1")
+    suspend fun getChannelByNameVariations(channelName: String, channelName2: String): LiveChannel?
+
+    @Query("SELECT * FROM live_channels ORDER BY RANDOM() LIMIT :limit")
+    suspend fun getRandomChannels(limit: Int): List<LiveChannel>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChannel(channel: LiveChannel): Long
     

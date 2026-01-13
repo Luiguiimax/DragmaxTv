@@ -3,3 +3,5 @@
     <item android:state_selected="true" android:drawable="@drawable/sidebar_selected" />
     <item android:drawable="@drawable/rounded_panel" />
 </selector>
+
+

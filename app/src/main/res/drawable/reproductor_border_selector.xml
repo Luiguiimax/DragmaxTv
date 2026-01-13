@@ -3,3 +3,5 @@
     <item android:state_selected="true" android:drawable="@drawable/reproductor_selected" />
     <item android:drawable="@drawable/rounded_content_area" />
 </selector>
+
+

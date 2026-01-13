@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
     
@@ -66,19 +68,29 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     android.util.Log.d("PlayerViewModel", "Processing ${fieldNames.size} M3U lists")
                     
                     // Procesar UNA M3U a la vez (estrictamente secuencial)
+                    // IMPORTANTE: Todo el procesamiento en Dispatchers.IO para no bloquear UI ni ExoPlayer
                     for ((index, fieldName) in fieldNames.withIndex()) {
-                        if (foundChannel) break
+                        if (foundChannel && _currentChannel.value != null) {
+                            // Si ya hay canal reproduciéndose, continuar procesando en background sin interrumpir
+                            android.util.Log.d("PlayerViewModel", "Canal reproduciéndose, continuando procesamiento en background...")
+                        }
                         
                         try {
-                            // FASE 1 - LECTURA
-                            val m3uUrl = repository.loadSingleM3UUrlFromFirebase(fieldName)
+                            // FASE 1 - LECTURA (en background)
+                            val m3uUrl = withContext(Dispatchers.IO) {
+                                repository.loadSingleM3UUrlFromFirebase(fieldName)
+                            }
                             if (m3uUrl == null) continue
                             
-                            // FASE 2 - DESCARGA Y FILTRO
-                            val downloadedM3u = repository.downloadAndFilterM3U(m3uUrl)
+                            // FASE 2 - DESCARGA Y FILTRO (en background, no bloquea ExoPlayer)
+                            val downloadedM3u = withContext(Dispatchers.IO) {
+                                repository.downloadAndFilterM3U(m3uUrl)
+                            }
                             
-                            // FASE 3 - CACHE EN ROOM
-                            val liveChannels = repository.processAndCacheLiveChannels(downloadedM3u)
+                            // FASE 3 - CACHE EN ROOM (en background)
+                            val liveChannels = withContext(Dispatchers.IO) {
+                                repository.processAndCacheLiveChannels(downloadedM3u)
+                            }
                             
                             // Actualizar progreso basado en canales procesados
                             totalChannelsProcessed += liveChannels.size
@@ -125,33 +137,46 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     )
                                     _currentChannel.postValue(preferredChannel)
                                     foundChannel = true
-                                    _loadingState.value = LoadingState.Success("Canal cargado: ${preferredChannel.name}")
+                                    // NO establecer Success aquí - se establecerá al final de TODO el procesamiento
                                 }
+                            } else if (_currentChannel.value != null) {
+                                // Ya hay canal reproduciéndose - NO interrumpir
+                                foundChannel = true
                             }
                             
-                            kotlinx.coroutines.delay(500)
+                            kotlinx.coroutines.delay(300)
                             
                         } catch (e: Exception) {
-                            e.printStackTrace()
+                            android.util.Log.e("PlayerViewModel", "Error procesando M3U $fieldName: ${e.message}", e)
                             kotlinx.coroutines.delay(1000)
                         }
                     }
                     
                     // Guardar fecha_list después de actualización exitosa
                     if (fechaListFromFirebase != null) {
-                        repository.saveFechaList(fechaListFromFirebase)
+                        withContext(Dispatchers.IO) {
+                            repository.saveFechaList(fechaListFromFirebase)
+                        }
                     }
                     
                     // Si no encontramos canal, intentar desde Room
                     if (!foundChannel) {
-                        val finalChannel = repository.loadChannelFromRoom()
+                        val finalChannel = withContext(Dispatchers.IO) {
+                            repository.loadChannelFromRoom()
+                        }
                         if (finalChannel != null) {
-                            _currentChannel.postValue(finalChannel)
-                            _loadingState.value = LoadingState.Success("Canal cargado: ${finalChannel.name}")
+                            // Solo actualizar si no hay canal reproduciéndose
+                            if (_currentChannel.value == null) {
+                                _currentChannel.postValue(finalChannel)
+                            }
                         } else {
                             _loadingState.value = LoadingState.Error("No se encontraron canales en vivo")
+                            return@launch
                         }
                     }
+                    
+                    // IMPORTANTE: Establecer Success SOLO cuando TODO el procesamiento esté completamente terminado
+                    _loadingState.value = LoadingState.Success("Canales listos")
                     
                 } else {
                     // HAY canales en Room → verificar fecha_list
@@ -168,8 +193,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     if (!needsUpdate) {
                         // fecha_list es IGUAL → NO hacer proceso, solo cargar desde Room
                         android.util.Log.d("PlayerViewModel", "No update needed, loading from cache: ${channelFromRoom.name}")
-                        _currentChannel.postValue(channelFromRoom)
-                        _loadingState.value = LoadingState.Success("Canal cargado desde caché: ${channelFromRoom.name}")
+                        // Solo actualizar si no hay canal reproduciéndose
+                        if (_currentChannel.value == null) {
+                            _currentChannel.postValue(channelFromRoom)
+                        }
+                        // Establecer Success cuando todo esté listo
+                        _loadingState.value = LoadingState.Success("Canales listos")
                         return@launch
                     }
                     
@@ -180,18 +209,28 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     var totalChannelsProcessed = 0
                     val totalChannelsExpected = fieldNames.size * 100 // Estimado
                     
-                    // Procesar UNA M3U a la vez
+                    // Procesar UNA M3U a la vez (en background, sin interrumpir canal actual)
+                    val currentChannelValue = _currentChannel.value
+                    val hasActiveChannel = currentChannelValue != null
+                    
                     for ((index, fieldName) in fieldNames.withIndex()) {
-                        if (foundChannel) break
+                        // Si hay canal reproduciéndose, continuar procesando en background sin interrumpir
+                        if (foundChannel && hasActiveChannel) {
+                            android.util.Log.d("PlayerViewModel", "Canal reproduciéndose (${currentChannelValue?.name}), procesando lista ${index + 1}/${fieldNames.size} en background...")
+                        }
                         
                         try {
-                            // FASE 1 - LECTURA
-                            val m3uUrl = repository.loadSingleM3UUrlFromFirebase(fieldName)
+                            // FASE 1 - LECTURA (en background)
+                            val m3uUrl = withContext(Dispatchers.IO) {
+                                repository.loadSingleM3UUrlFromFirebase(fieldName)
+                            }
                             if (m3uUrl == null) continue
                             
-                            // Si la URL ya está en caché, procesar directamente
+                            // Si la URL ya está en caché, procesar directamente (en background)
                             if (m3uUrl.content != null && m3uUrl.content.isNotBlank()) {
-                                val liveChannels = repository.processAndCacheLiveChannels(m3uUrl)
+                                val liveChannels = withContext(Dispatchers.IO) {
+                                    repository.processAndCacheLiveChannels(m3uUrl)
+                                }
                                 totalChannelsProcessed += liveChannels.size
                                 
                                 val progress = if (totalChannelsExpected > 0) {
@@ -217,7 +256,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     kotlinx.coroutines.delay(500)
                                 }
                                 
-                                if (!foundChannel && liveChannels.isNotEmpty()) {
+                                // CRÍTICO: Solo actualizar canal si NO hay uno reproduciéndose
+                                if (!foundChannel && liveChannels.isNotEmpty() && !hasActiveChannel) {
                                     _loadingState.value = LoadingState.Loading(
                                         "Cargando desde el dispositivo…",
                                         progress = 50,
@@ -225,7 +265,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                         phase = LoadingPhase.LOADING_FROM_DEVICE
                                     )
                                     
-                                    val preferredChannel = repository.getCaracolFHDOrFirstColombia()
+                                    val preferredChannel = withContext(Dispatchers.IO) {
+                                        repository.getCaracolFHDOrFirstColombia()
+                                    }
                                     if (preferredChannel != null) {
                                         _loadingState.value = LoadingState.Loading(
                                             "Cargando desde el dispositivo…",
@@ -235,17 +277,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                         )
                                         _currentChannel.postValue(preferredChannel)
                                         foundChannel = true
-                                        _loadingState.value = LoadingState.Success("Canal cargado: ${preferredChannel.name}")
+                                        // NO establecer Success aquí - se establecerá al final de TODO el procesamiento
                                     }
+                                } else if (hasActiveChannel) {
+                                    // Ya hay canal reproduciéndose - NO interrumpir, solo actualizar caché
+                                    android.util.Log.d("PlayerViewModel", "Canal ${currentChannelValue?.name} reproduciéndose - actualizando caché sin interrumpir")
+                                    foundChannel = true // Marcar como encontrado pero NO cambiar el canal actual
                                 }
                                 continue
                             }
                             
-                            // FASE 2 - DESCARGA Y FILTRO
-                            val downloadedM3u = repository.downloadAndFilterM3U(m3uUrl)
+                            // FASE 2 - DESCARGA Y FILTRO (en background)
+                            val downloadedM3u = withContext(Dispatchers.IO) {
+                                repository.downloadAndFilterM3U(m3uUrl)
+                            }
                             
-                            // FASE 3 - CACHE EN ROOM
-                            val liveChannels = repository.processAndCacheLiveChannels(downloadedM3u)
+                            // FASE 3 - CACHE EN ROOM (en background)
+                            val liveChannels = withContext(Dispatchers.IO) {
+                                repository.processAndCacheLiveChannels(downloadedM3u)
+                            }
                             totalChannelsProcessed += liveChannels.size
                             
                             val progress = if (totalChannelsExpected > 0) {
@@ -271,8 +321,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                 kotlinx.coroutines.delay(500)
                             }
                             
-                            // FASE 4 - CARGA
-                            if (!foundChannel && liveChannels.isNotEmpty()) {
+                            // FASE 4 - CARGA (solo si no hay canal reproduciéndose)
+                            if (!foundChannel && liveChannels.isNotEmpty() && !hasActiveChannel) {
                                 _loadingState.value = LoadingState.Loading(
                                     "Cargando desde el dispositivo…",
                                     progress = 50,
@@ -280,7 +330,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     phase = LoadingPhase.LOADING_FROM_DEVICE
                                 )
                                 
-                                val preferredChannel = repository.getCaracolFHDOrFirstColombia()
+                                val preferredChannel = withContext(Dispatchers.IO) {
+                                    repository.getCaracolFHDOrFirstColombia()
+                                }
                                 if (preferredChannel != null) {
                                     _loadingState.value = LoadingState.Loading(
                                         "Cargando desde el dispositivo…",
@@ -290,35 +342,47 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                     )
                                     _currentChannel.postValue(preferredChannel)
                                     foundChannel = true
-                                    _loadingState.value = LoadingState.Success("Canal cargado: ${preferredChannel.name}")
+                                    // NO establecer Success aquí - se establecerá al final de TODO el procesamiento
                                 }
+                            } else if (hasActiveChannel) {
+                                // Ya hay canal reproduciéndose - NO interrumpir
+                                foundChannel = true
                             }
                             
-                            kotlinx.coroutines.delay(500)
+                            kotlinx.coroutines.delay(300)
                             
                         } catch (e: Exception) {
-                            e.printStackTrace()
+                            android.util.Log.e("PlayerViewModel", "Error procesando M3U $fieldName: ${e.message}", e)
                             kotlinx.coroutines.delay(1000)
                         }
                     }
                     
                     // Guardar fecha_list después de actualización exitosa
                     if (fechaListFromFirebase != null) {
-                        repository.saveFechaList(fechaListFromFirebase)
+                        withContext(Dispatchers.IO) {
+                            repository.saveFechaList(fechaListFromFirebase)
+                        }
                     }
                     
                     // Si no encontramos canal, usar el de Room
                     if (!foundChannel) {
-                        val finalChannel = repository.loadChannelFromRoom()
+                        val finalChannel = withContext(Dispatchers.IO) {
+                            repository.loadChannelFromRoom()
+                        }
                         if (finalChannel != null) {
-                            _currentChannel.postValue(finalChannel)
-                            _loadingState.value = LoadingState.Success("Canal cargado desde caché: ${finalChannel.name}")
+                            // Solo actualizar si no hay canal reproduciéndose
+                            if (_currentChannel.value == null) {
+                                _currentChannel.postValue(finalChannel)
+                            }
                         }
                     }
+                    
+                    // IMPORTANTE: Establecer Success SOLO cuando TODO el procesamiento esté completamente terminado
+                    _loadingState.value = LoadingState.Success("Canales listos")
                 }
             } catch (e: Exception) {
+                android.util.Log.e("PlayerViewModel", "Error en loadChannels: ${e.message}", e)
                 _loadingState.value = LoadingState.Error("Error: ${e.message}")
-                e.printStackTrace()
             }
         }
     }
